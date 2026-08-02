@@ -232,6 +232,11 @@ Copy the resulting binary to:
 /media/fat/Scripts/.config/CollectionLauncher/collection_launcher
 ```
 
+## Known Issues
+
+- When CollectionLauncher is opened through NFC/Zaparoo, the core's OSD menu may automatically open after launching a game. This does not occur when CollectionLauncher is started directly from the MiSTer Scripts menu.
+- Zaparoo's **HOLD** mode is currently not compatible with CollectionLauncher.
+
 ## Notes
 
 CollectionLauncher does not include games/ROMs, artwork or music files.
