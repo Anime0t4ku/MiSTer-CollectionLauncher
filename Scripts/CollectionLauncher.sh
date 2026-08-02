@@ -1,5 +1,5 @@
 #!/bin/bash
-VERSION="0.4.8"
+VERSION="0.5.0"
 BASE="/media/fat/Scripts/.config/CollectionLauncher"
 TMP="$BASE/tmp"
 mkdir -p "$TMP"

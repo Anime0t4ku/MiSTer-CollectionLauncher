@@ -147,12 +147,15 @@ Arrows only appear when more games exist on that side.
 
 ## Supported Systems
 
-Current launch mappings include:
+CollectionLauncher includes presets for the systems documented in the [MiSTer MGL system table](https://github.com/wizzomafizzo/mrext/blob/main/docs/systems.md). The correct launch settings are selected automatically from the system and file extension.
 
-```text
-PSX
-Saturn
-SNES
+For most systems, a game entry only needs the system name and game path:
+
+```json
+"launch": {
+  "system": "Saturn",
+  "path": "/media/fat/games/Saturn/Example Game.chd"
+}
 ```
 
 Game paths should use the full MiSTer path, for example:
@@ -160,6 +163,45 @@ Game paths should use the full MiSTer path, for example:
 ```text
 /media/fat/games/...
 /media/fat/cifs/games/...
+```
+
+For systems that need more than one mounted file, use `files` with friendly roles. For example, ao486 can mount a hard disk and CD together:
+
+```json
+"launch": {
+  "system": "ao486",
+  "files": [
+    {
+      "role": "hdd",
+      "path": "/media/fat/games/AO486/Example.vhd"
+    },
+    {
+      "role": "cd",
+      "path": "/media/fat/games/AO486/Example.iso"
+    }
+  ]
+}
+```
+
+Saturn RAM expansion can be selected per game:
+
+```json
+"launch": {
+  "system": "Saturn",
+  "path": "/media/fat/games/Saturn/Example Game.chd",
+  "ram": "4MB"
+}
+```
+
+Supported values are `none`, `1MB` and `4MB`. If `ram` is omitted, `none` is used.
+
+For Arcade, point CollectionLauncher to the game's `.mra` file:
+
+```json
+"launch": {
+  "system": "Arcade",
+  "path": "/media/fat/_Arcade/Example Game.mra"
+}
 ```
 
 ## Building From Source

@@ -20,7 +20,7 @@ import (
 	"unsafe"
 )
 
-const version = "0.4.8"
+const version = "0.5.0"
 const defaultBase = "/media/fat/Scripts/.config/CollectionLauncher"
 
 var runtimeBase = defaultBase
@@ -96,9 +96,16 @@ const (
 	absHatY  = 17
 )
 
+type LaunchFile struct {
+	Role string `json:"role,omitempty"`
+	Path string `json:"path"`
+}
+
 type Launch struct {
-	System string `json:"system"`
-	Path   string `json:"path"`
+	System string       `json:"system"`
+	Path   string       `json:"path,omitempty"`
+	Files  []LaunchFile `json:"files,omitempty"`
+	RAM    string       `json:"ram,omitempty"`
 }
 
 type Entry struct {
@@ -352,8 +359,8 @@ func loadCollection(path string) (*Collection, error) {
 		if e.Label == "" || e.Artwork == "" {
 			return nil, fmt.Errorf("entry %d requires label and artwork", i+1)
 		}
-		if e.Command == "" && (e.Launch.System == "" || e.Launch.Path == "") {
-			return nil, fmt.Errorf("entry %d requires launch.system + launch.path (or legacy command)", i+1)
+		if e.Command == "" && (e.Launch.System == "" || (e.Launch.Path == "" && len(e.Launch.Files) == 0)) {
+			return nil, fmt.Errorf("entry %d requires launch.system and launch.path or launch.files (or legacy command)", i+1)
 		}
 	}
 	return &c, nil
@@ -880,32 +887,922 @@ func drawCollectionSelection(fb *framebuffer, v *collectionView, sel int, window
 	fb.text((fb.w-textWidth(2, help))/2, fb.h-42, 2, help, color.RGBA{210, 210, 210, 255})
 }
 
-type mglConfig struct {
+type mglVariant struct {
+	Role  string
+	Label string
+	Exts  []string
+	Delay int
+	Type  string
+	Index int
+}
+
+type systemPreset struct {
+	ID       string
 	RBF      string
-	GamesDir string
-	Delay    int
-	Type     string
-	Index    int
-	SetName  string
+	Aliases  []string
+	Variants []mglVariant
+}
+
+var systemPresets = []systemPreset{
+	{
+		ID: "AdventureVision", RBF: "_Console/AdventureVision",
+		Aliases: []string{"AVision", "Adventure Vision"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "Game", Exts: []string{".bin"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "Amiga", RBF: "_Computer/Minimig",
+		Aliases: []string{"Minimig", "Amiga"},
+		Variants: []mglVariant{
+			{Role: "floppy1", Label: "df0", Exts: []string{".adf"}, Delay: 1, Type: "f", Index: 0},
+		},
+	},
+	{
+		ID: "AmigaCD32", RBF: "_Computer/Minimig",
+		Aliases: []string{"AmigaCD32", "Amiga CD32"},
+		Variants: []mglVariant{
+			{Role: "cd", Label: "CD Image", Exts: []string{".cue", ".chd"}, Delay: 1, Type: "s", Index: 1},
+		},
+	},
+	{
+		ID: "Amstrad", RBF: "_Computer/Amstrad",
+		Aliases: []string{"Amstrad CPC"},
+		Variants: []mglVariant{
+			{Role: "floppy1", Label: "A:", Exts: []string{".dsk"}, Delay: 1, Type: "s", Index: 0},
+			{Role: "floppy2", Label: "B:", Exts: []string{".dsk"}, Delay: 1, Type: "s", Index: 1},
+			{Role: "expansion", Label: "Expansion", Exts: []string{".e??"}, Delay: 1, Type: "f", Index: 3},
+			{Role: "tape", Label: "Tape", Exts: []string{".cdt"}, Delay: 1, Type: "f", Index: 4},
+		},
+	},
+	{
+		ID: "AmstradPCW", RBF: "_Computer/Amstrad-PCW",
+		Aliases: []string{"Amstrad-PCW", "Amstrad PCW"},
+		Variants: []mglVariant{
+			{Role: "floppy1", Label: "A:", Exts: []string{".dsk"}, Delay: 1, Type: "s", Index: 0},
+			{Role: "floppy2", Label: "B:", Exts: []string{".dsk"}, Delay: 1, Type: "s", Index: 1},
+		},
+	},
+	{
+		ID: "Apogee", RBF: "_Computer/Apogee",
+		Aliases: []string{"Apogee BK-01"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".rka", ".rkr", ".gam"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "AppleI", RBF: "_Computer/Apple-I",
+		Aliases: []string{"Apple-I", "Apple I"},
+		Variants: []mglVariant{
+			{Role: "ascii", Label: "ASCII", Exts: []string{".txt"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "AppleII", RBF: "_Computer/Apple-II",
+		Aliases: []string{"Apple-II", "Apple IIe"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".nib", ".dsk", ".do", ".po"}, Delay: 1, Type: "s", Index: 0},
+			{Role: "game", Label: "-", Exts: []string{".hdv"}, Delay: 1, Type: "s", Index: 1},
+		},
+	},
+	{
+		ID: "Arcadia", RBF: "_Console/Arcadia",
+		Aliases: []string{"Arcadia 2001"},
+		Variants: []mglVariant{
+			{Role: "cart", Label: "Cartridge", Exts: []string{".bin"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "Arduboy", RBF: "_Other/Arduboy",
+		Aliases: []string{"Arduboy"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".bin", ".hex"}, Delay: 1, Type: "f", Index: 0},
+		},
+	},
+	{
+		ID: "Atari2600", RBF: "_Console/Atari7800",
+		Aliases: []string{"Atari 2600"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".a26"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "Atari5200", RBF: "_Console/Atari5200",
+		Aliases: []string{"Atari 5200"},
+		Variants: []mglVariant{
+			{Role: "cart", Label: "Cart", Exts: []string{".car", ".a52", ".bin", ".rom"}, Delay: 1, Type: "s", Index: 1},
+		},
+	},
+	{
+		ID: "Atari7800", RBF: "_Console/Atari7800",
+		Aliases: []string{"Atari 7800"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".a78", ".bin"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "Atari800", RBF: "_Computer/Atari800",
+		Aliases: []string{"Atari 800XL"},
+		Variants: []mglVariant{
+			{Role: "d1", Label: "D1", Exts: []string{".atr", ".xex", ".xfd", ".atx"}, Delay: 1, Type: "s", Index: 0},
+			{Role: "d2", Label: "D2", Exts: []string{".atr", ".xex", ".xfd", ".atx"}, Delay: 1, Type: "s", Index: 1},
+			{Role: "cart", Label: "Cartridge", Exts: []string{".car", ".rom", ".bin"}, Delay: 1, Type: "s", Index: 2},
+		},
+	},
+	{
+		ID: "AtariLynx", RBF: "_Console/AtariLynx",
+		Aliases: []string{"Atari Lynx"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".lnx"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "AcornAtom", RBF: "_Computer/AcornAtom",
+		Aliases: []string{"Atom"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".vhd"}, Delay: 1, Type: "s", Index: 1},
+		},
+	},
+	{
+		ID: "BBCMicro", RBF: "_Computer/BBCMicro",
+		Aliases: []string{"BBC Micro/Master"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".vhd"}, Delay: 1, Type: "s", Index: 0},
+			{Role: "game", Label: "-", Exts: []string{".ssd", ".dsd"}, Delay: 1, Type: "s", Index: 1},
+			{Role: "game", Label: "-", Exts: []string{".ssd", ".dsd"}, Delay: 1, Type: "s", Index: 2},
+		},
+	},
+	{
+		ID: "BK0011M", RBF: "_Computer/BK0011M",
+		Aliases: []string{"BK0011M"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".bin"}, Delay: 1, Type: "f", Index: 1},
+			{Role: "fdda", Label: "FDD(A)", Exts: []string{".dsk"}, Delay: 1, Type: "s", Index: 1},
+			{Role: "fddb", Label: "FDD(B)", Exts: []string{".dsk"}, Delay: 1, Type: "s", Index: 2},
+			{Role: "hdd", Label: "HDD", Exts: []string{".vhd"}, Delay: 1, Type: "s", Index: 0},
+		},
+	},
+	{
+		ID: "Astrocade", RBF: "_Console/Astrocade",
+		Aliases: []string{"Bally Astrocade"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".bin"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "CDI", RBF: "_Console/CDi",
+		Aliases: []string{"CD-I"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".cue", ".chd"}, Delay: 1, Type: "s", Index: 1},
+		},
+	},
+	{
+		ID: "Chip8", RBF: "_Other/Chip8",
+		Aliases: []string{"CHIP-8"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".ch8"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "CasioPV1000", RBF: "_Console/Casio_PV-1000",
+		Aliases: []string{"Casio_PV-1000", "Casio PV-1000"},
+		Variants: []mglVariant{
+			{Role: "cart", Label: "Cartridge", Exts: []string{".bin"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "CasioPV2000", RBF: "_Computer/Casio_PV-2000",
+		Aliases: []string{"Casio_PV-2000", "Casio PV-2000"},
+		Variants: []mglVariant{
+			{Role: "cart", Label: "Cartridge", Exts: []string{".bin"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "ChannelF", RBF: "_Console/ChannelF",
+		Aliases: []string{"Channel F"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".rom", ".bin"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "ColecoVision", RBF: "_Console/ColecoVision",
+		Aliases: []string{"Coleco", "ColecoVision"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".col", ".bin", ".rom"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "C16", RBF: "_Computer/C16",
+		Aliases: []string{"Commodore 16"},
+		Variants: []mglVariant{
+			{Role: "8", Label: "#8", Exts: []string{".d64", ".g64"}, Delay: 1, Type: "s", Index: 0},
+			{Role: "9", Label: "#9", Exts: []string{".d64", ".g64"}, Delay: 1, Type: "s", Index: 1},
+			{Role: "game", Label: "-", Exts: []string{".prg", ".tap", ".bin"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "C64", RBF: "_Computer/C64",
+		Aliases: []string{"Commodore 64"},
+		Variants: []mglVariant{
+			{Role: "8", Label: "#8", Exts: []string{".d64", ".g64", ".t64", ".d81"}, Delay: 1, Type: "s", Index: 0},
+			{Role: "9", Label: "#9", Exts: []string{".d64", ".g64", ".t64", ".d81"}, Delay: 1, Type: "s", Index: 1},
+			{Role: "game", Label: "-", Exts: []string{".prg", ".crt", ".reu", ".tap"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "PET2001", RBF: "_Computer/PET2001",
+		Aliases: []string{"Commodore PET 2001"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".prg", ".tap"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "VIC20", RBF: "_Computer/VIC20",
+		Aliases: []string{"Commodore VIC-20"},
+		Variants: []mglVariant{
+			{Role: "8", Label: "#8", Exts: []string{".d64", ".g64"}, Delay: 1, Type: "s", Index: 0},
+			{Role: "9", Label: "#9", Exts: []string{".d64", ".g64"}, Delay: 1, Type: "s", Index: 1},
+			{Role: "game", Label: "-", Exts: []string{".prg", ".crt", ".ct?", ".tap"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "EDSAC", RBF: "_Computer/EDSAC",
+		Aliases: []string{"EDSAC"},
+		Variants: []mglVariant{
+			{Role: "tape", Label: "Tape", Exts: []string{".tap"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "AcornElectron", RBF: "_Computer/AcornElectron",
+		Aliases: []string{"Electron"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".vhd"}, Delay: 1, Type: "s", Index: 0},
+		},
+	},
+	{
+		ID: "FDS", RBF: "_Console/NES",
+		Aliases: []string{"FamicomDiskSystem", "Famicom Disk System"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".fds"}, Delay: 2, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "Galaksija", RBF: "_Computer/Galaksija",
+		Aliases: []string{"Galaksija"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".tap"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "Gamate", RBF: "_Console/Gamate",
+		Aliases: []string{"Gamate"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".bin"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "GameNWatch", RBF: "_Console/GnW",
+		Aliases: []string{"Game & Watch"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".bin"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "GameGear", RBF: "_Console/SMS",
+		Aliases: []string{"GG", "Game Gear"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".gg"}, Delay: 1, Type: "f", Index: 2},
+		},
+	},
+	{
+		ID: "Gameboy", RBF: "_Console/Gameboy",
+		Aliases: []string{"GB", "Gameboy"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".gb"}, Delay: 2, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "Gameboy2P", RBF: "_Console/Gameboy2P",
+		Aliases: []string{"Gameboy (2 Player)"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".gb", ".gbc"}, Delay: 2, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "GBA", RBF: "_Console/GBA",
+		Aliases: []string{"GameboyAdvance", "Gameboy Advance"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".gba"}, Delay: 2, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "GBA2P", RBF: "_Console/GBA2P",
+		Aliases: []string{"Gameboy Advance (2 Player)"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".gba"}, Delay: 2, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "GameboyColor", RBF: "_Console/Gameboy",
+		Aliases: []string{"GBC", "Gameboy Color"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".gbc"}, Delay: 2, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "Genesis", RBF: "_Console/MegaDrive",
+		Aliases: []string{"MegaDrive", "Genesis"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".bin", ".gen", ".md"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "Sega32X", RBF: "_Console/S32X",
+		Aliases: []string{"S32X", "32X", "Genesis 32X"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".32x"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "Groovy", RBF: "_Utility/Groovy",
+		Aliases: []string{"Groovy"},
+		Variants: []mglVariant{
+			{Role: "gmc", Label: "GMC", Exts: []string{".gmc"}, Delay: 3, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "Intellivision", RBF: "_Console/Intellivision",
+		Aliases: []string{"Intellivision"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".int", ".bin"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "Interact", RBF: "_Computer/Interact",
+		Aliases: []string{"Interact"},
+		Variants: []mglVariant{
+			{Role: "tape", Label: "Tape", Exts: []string{".cin", ".k7"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "Jaguar", RBF: "_Console/Jaguar",
+		Aliases: []string{"Jaguar"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".jag", ".j64", ".rom", ".bin"}, Delay: 1, Type: "s", Index: 1},
+		},
+	},
+	{
+		ID: "Jupiter", RBF: "_Computer/Jupiter",
+		Aliases: []string{"Jupiter Ace"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".ace"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "Laser", RBF: "_Computer/Laser310",
+		Aliases: []string{"Laser310", "Laser 350/500/700"},
+		Variants: []mglVariant{
+			{Role: "vzimage", Label: "VZ Image", Exts: []string{".vz"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "Lynx48", RBF: "_Computer/Lynx48",
+		Aliases: []string{"Lynx 48/96K"},
+		Variants: []mglVariant{
+			{Role: "tape", Label: "Cassette", Exts: []string{".tap"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "SordM5", RBF: "_Computer/SordM5",
+		Aliases: []string{"Sord M5", "M5"},
+		Variants: []mglVariant{
+			{Role: "rom", Label: "ROM", Exts: []string{".bin", ".rom"}, Delay: 1, Type: "f", Index: 1},
+			{Role: "tape", Label: "Tape", Exts: []string{".cas"}, Delay: 1, Type: "f", Index: 2},
+		},
+	},
+	{
+		ID: "MSX", RBF: "_Computer/MSX",
+		Aliases: []string{"MSX"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".vhd"}, Delay: 1, Type: "s", Index: 1},
+		},
+	},
+	{
+		ID: "MSX1", RBF: "_Computer/MSX1",
+		Aliases: []string{"MSX1"},
+		Variants: []mglVariant{
+			{Role: "floppy1", Label: "Drive A:", Exts: []string{".dsk"}, Delay: 1, Type: "s", Index: 1},
+			{Role: "slota", Label: "SLOT A", Exts: []string{".rom"}, Delay: 1, Type: "f", Index: 2},
+			{Role: "slotb", Label: "SLOT B", Exts: []string{".rom"}, Delay: 1, Type: "f", Index: 3},
+		},
+	},
+	{
+		ID: "MacPlus", RBF: "_Computer/MacPlus",
+		Aliases: []string{"Macintosh Plus"},
+		Variants: []mglVariant{
+			{Role: "prifloppy", Label: "Pri Floppy", Exts: []string{".dsk"}, Delay: 1, Type: "f", Index: 1},
+			{Role: "secfloppy", Label: "Sec Floppy", Exts: []string{".dsk"}, Delay: 1, Type: "f", Index: 2},
+			{Role: "scsi6", Label: "SCSI-6", Exts: []string{".img", ".vhd"}, Delay: 1, Type: "s", Index: 0},
+			{Role: "scsi5", Label: "SCSI-5", Exts: []string{".img", ".vhd"}, Delay: 1, Type: "s", Index: 1},
+		},
+	},
+	{
+		ID: "Odyssey2", RBF: "_Console/Odyssey2",
+		Aliases: []string{"Magnavox Odyssey2"},
+		Variants: []mglVariant{
+			{Role: "cart", Label: "Cartridge", Exts: []string{".bin"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "MasterSystem", RBF: "_Console/SMS",
+		Aliases: []string{"SMS", "Master System"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".sms"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "Aquarius", RBF: "_Computer/Aquarius",
+		Aliases: []string{"Mattel Aquarius"},
+		Variants: []mglVariant{
+			{Role: "cart", Label: "Cartridge", Exts: []string{".bin"}, Delay: 1, Type: "f", Index: 1},
+			{Role: "tape", Label: "Tape", Exts: []string{".caq"}, Delay: 1, Type: "f", Index: 2},
+		},
+	},
+	{
+		ID: "MegaDuck", RBF: "_Console/Gameboy",
+		Aliases: []string{"Mega Duck"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".bin"}, Delay: 2, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "MultiComp", RBF: "_Computer/MultiComp",
+		Aliases: []string{"MultiComp"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".img"}, Delay: 1, Type: "s", Index: 1},
+		},
+	},
+	{
+		ID: "NES", RBF: "_Console/NES",
+		Aliases: []string{"NES"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".nes"}, Delay: 2, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "NESMusic", RBF: "_Console/NES",
+		Aliases: []string{"NES Music"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".nsf"}, Delay: 2, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "NeoGeoCD", RBF: "_Console/NeoGeo",
+		Aliases: []string{"Neo Geo CD"},
+		Variants: []mglVariant{
+			{Role: "cd", Label: "CD Image", Exts: []string{".cue", ".chd"}, Delay: 1, Type: "s", Index: 1},
+		},
+	},
+	{
+		ID: "NeoGeo", RBF: "_Console/NeoGeo",
+		Aliases: []string{"Neo Geo MVS/AES"},
+		Variants: []mglVariant{
+			{Role: "cart", Label: "ROM set", Exts: []string{".neo"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "Nintendo64", RBF: "_Console/N64",
+		Aliases: []string{"N64", "Nintendo 64"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".n64", ".z64"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "Orao", RBF: "_Computer/ORAO",
+		Aliases: []string{"Orao"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".tap"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "Oric", RBF: "_Computer/Oric",
+		Aliases: []string{"Oric"},
+		Variants: []mglVariant{
+			{Role: "floppy1", Label: "Drive A:", Exts: []string{".dsk"}, Delay: 1, Type: "s", Index: 0},
+		},
+	},
+	{
+		ID: "ao486", RBF: "_Computer/ao486",
+		Aliases: []string{"PC (486SX)"},
+		Variants: []mglVariant{
+			{Role: "floppy1", Label: "Floppy A:", Exts: []string{".img", ".ima", ".vfd"}, Delay: 1, Type: "s", Index: 0},
+			{Role: "hdd", Label: "IDE 0-0", Exts: []string{".vhd"}, Delay: 1, Type: "s", Index: 2},
+			{Role: "cd", Label: "CD", Exts: []string{".iso"}, Delay: 1, Type: "s", Index: 4},
+		},
+	},
+	{
+		ID: "PCXT", RBF: "_Computer/PCXT",
+		Aliases: []string{"PC/XT"},
+		Variants: []mglVariant{
+			{Role: "floppy1", Label: "Floppy A:", Exts: []string{".img", ".ima", ".vfd"}, Delay: 1, Type: "s", Index: 0},
+			{Role: "floppy2", Label: "Floppy B:", Exts: []string{".img", ".ima", ".vfd"}, Delay: 1, Type: "s", Index: 1},
+			{Role: "hdd", Label: "IDE 0-0", Exts: []string{".vhd"}, Delay: 1, Type: "s", Index: 2},
+			{Role: "hdd2", Label: "IDE 0-1", Exts: []string{".vhd"}, Delay: 1, Type: "s", Index: 3},
+		},
+	},
+	{
+		ID: "PDP1", RBF: "_Computer/PDP1",
+		Aliases: []string{"PDP-1"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".pdp", ".rim", ".bin"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "PMD85", RBF: "_Computer/PMD85",
+		Aliases: []string{"PMD 85-2A"},
+		Variants: []mglVariant{
+			{Role: "rompack", Label: "ROM Pack", Exts: []string{".rmm"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "PSX", RBF: "_Console/PSX",
+		Aliases: []string{"Playstation", "PS1"},
+		Variants: []mglVariant{
+			{Role: "cd", Label: "CD", Exts: []string{".cue", ".chd"}, Delay: 1, Type: "s", Index: 1},
+			{Role: "exe", Label: "Exe", Exts: []string{".exe"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "PocketChallengeV2", RBF: "_Console/WonderSwan",
+		Aliases: []string{"Pocket Challenge V2"},
+		Variants: []mglVariant{
+			{Role: "rom", Label: "ROM", Exts: []string{".pc2"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "PokemonMini", RBF: "_Console/PokemonMini",
+		Aliases: []string{"Pokemon Mini"},
+		Variants: []mglVariant{
+			{Role: "rom", Label: "ROM", Exts: []string{".min"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "RX78", RBF: "_Computer/RX78",
+		Aliases: []string{"RX-78 Gundam"},
+		Variants: []mglVariant{
+			{Role: "cart", Label: "Cartridge", Exts: []string{".bin"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "SAMCoupe", RBF: "_Computer/SAMCoupe",
+		Aliases: []string{"SAM Coupe"},
+		Variants: []mglVariant{
+			{Role: "drive1", Label: "Drive 1", Exts: []string{".dsk", ".mgt", ".img"}, Delay: 1, Type: "s", Index: 0},
+			{Role: "drive2", Label: "Drive 2", Exts: []string{".dsk", ".mgt", ".img"}, Delay: 1, Type: "s", Index: 1},
+		},
+	},
+	{
+		ID: "SG1000", RBF: "_Console/ColecoVision",
+		Aliases: []string{"SG-1000"},
+		Variants: []mglVariant{
+			{Role: "sg1000", Label: "SG-1000", Exts: []string{".sg"}, Delay: 1, Type: "f", Index: 0},
+		},
+	},
+	{
+		ID: "SNES", RBF: "_Console/SNES",
+		Aliases: []string{"SuperNintendo", "SNES"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".sfc", ".smc", ".bin", ".bs"}, Delay: 2, Type: "f", Index: 0},
+		},
+	},
+	{
+		ID: "SNESMusic", RBF: "_Console/SNES",
+		Aliases: []string{"SNES Music"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".spc"}, Delay: 2, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "SVI328", RBF: "_Computer/Svi328",
+		Aliases: []string{"SV-328"},
+		Variants: []mglVariant{
+			{Role: "cart", Label: "Cartridge", Exts: []string{".bin", ".rom"}, Delay: 1, Type: "f", Index: 1},
+			{Role: "casfile", Label: "CAS File", Exts: []string{".cas"}, Delay: 1, Type: "f", Index: 2},
+		},
+	},
+	{
+		ID: "Saturn", RBF: "_Console/Saturn",
+		Aliases: []string{"Saturn"},
+		Variants: []mglVariant{
+			{Role: "disk", Label: "Disk", Exts: []string{".cue", ".chd"}, Delay: 1, Type: "s", Index: 0},
+		},
+	},
+	{
+		ID: "MegaCD", RBF: "_Console/MegaCD",
+		Aliases: []string{"SegaCD", "Sega CD"},
+		Variants: []mglVariant{
+			{Role: "disk", Label: "Disk", Exts: []string{".cue", ".chd"}, Delay: 1, Type: "s", Index: 0},
+		},
+	},
+	{
+		ID: "QL", RBF: "_Computer/QL",
+		Aliases: []string{"Sinclair QL"},
+		Variants: []mglVariant{
+			{Role: "hdd", Label: "HD Image", Exts: []string{".win"}, Delay: 1, Type: "s", Index: 0},
+			{Role: "mdvimage", Label: "MDV Image", Exts: []string{".mdv"}, Delay: 1, Type: "f", Index: 2},
+		},
+	},
+	{
+		ID: "Specialist", RBF: "_Computer/Specialist",
+		Aliases: []string{"SPMX", "Specialist/MX"},
+		Variants: []mglVariant{
+			{Role: "tape", Label: "Tape", Exts: []string{".rks"}, Delay: 1, Type: "f", Index: 0},
+			{Role: "disk", Label: "Disk", Exts: []string{".odi"}, Delay: 1, Type: "s", Index: 0},
+		},
+	},
+	{
+		ID: "SuperGameboy", RBF: "_Console/SGB",
+		Aliases: []string{"SGB", "Super Gameboy"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".gb", ".gbc"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "SuperGrafx", RBF: "_Console/TurboGrafx16",
+		Aliases: []string{"SuperGrafx"},
+		Variants: []mglVariant{
+			{Role: "supergrafx", Label: "SuperGrafx", Exts: []string{".sgx"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "SuperVision", RBF: "_Console/SuperVision",
+		Aliases: []string{"SuperVision"},
+		Variants: []mglVariant{
+			{Role: "cart", Label: "Cartridge", Exts: []string{".bin", ".sv"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "TI994A", RBF: "_Computer/Ti994a",
+		Aliases: []string{"TI-99_4A", "TI-99/4A"},
+		Variants: []mglVariant{
+			{Role: "fullcart", Label: "Full Cart", Exts: []string{".m99", ".bin"}, Delay: 1, Type: "f", Index: 1},
+			{Role: "romcart", Label: "ROM Cart", Exts: []string{".bin"}, Delay: 1, Type: "f", Index: 2},
+			{Role: "gromcart", Label: "GROM Cart", Exts: []string{".bin"}, Delay: 1, Type: "f", Index: 3},
+		},
+	},
+	{
+		ID: "TRS80", RBF: "_Computer/TRS-80",
+		Aliases: []string{"TRS-80"},
+		Variants: []mglVariant{
+			{Role: "floppy1", Label: "Disk 0", Exts: []string{".dsk", ".jvi"}, Delay: 1, Type: "s", Index: 0},
+			{Role: "floppy2", Label: "Disk 1", Exts: []string{".dsk", ".jvi"}, Delay: 1, Type: "s", Index: 1},
+			{Role: "program", Label: "Program", Exts: []string{".cmd"}, Delay: 1, Type: "f", Index: 2},
+			{Role: "tape", Label: "Cassette", Exts: []string{".cas"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "CoCo2", RBF: "_Computer/CoCo2",
+		Aliases: []string{"TRS-80 CoCo 2"},
+		Variants: []mglVariant{
+			{Role: "cart", Label: "Cartridge", Exts: []string{".rom", ".ccc"}, Delay: 1, Type: "f", Index: 1},
+			{Role: "diskdrive0", Label: "Disk Drive 0", Exts: []string{".dsk"}, Delay: 1, Type: "s", Index: 0},
+			{Role: "diskdrive1", Label: "Disk Drive 1", Exts: []string{".dsk"}, Delay: 1, Type: "s", Index: 1},
+			{Role: "diskdrive2", Label: "Disk Drive 2", Exts: []string{".dsk"}, Delay: 1, Type: "s", Index: 2},
+			{Role: "diskdrive3", Label: "Disk Drive 3", Exts: []string{".dsk"}, Delay: 1, Type: "s", Index: 3},
+			{Role: "tape", Label: "Cassette", Exts: []string{".cas"}, Delay: 1, Type: "f", Index: 2},
+		},
+	},
+	{
+		ID: "ZX81", RBF: "_Computer/ZX81",
+		Aliases: []string{"TS-1500"},
+		Variants: []mglVariant{
+			{Role: "tape", Label: "Tape", Exts: []string{".0", ".p"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "TSConf", RBF: "_Computer/TSConf",
+		Aliases: []string{"TS-Config"},
+		Variants: []mglVariant{
+			{Role: "virtualsd", Label: "Virtual SD", Exts: []string{".vhd"}, Delay: 1, Type: "s", Index: 0},
+		},
+	},
+	{
+		ID: "AliceMC10", RBF: "_Computer/AliceMC10",
+		Aliases: []string{"Tandy MC-10"},
+		Variants: []mglVariant{
+			{Role: "tape", Label: "Tape", Exts: []string{".c10"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "TatungEinstein", RBF: "_Computer/TatungEinstein",
+		Aliases: []string{"Tatung Einstein"},
+		Variants: []mglVariant{
+			{Role: "floppy1", Label: "Disk 0", Exts: []string{".dsk"}, Delay: 1, Type: "s", Index: 0},
+		},
+	},
+	{
+		ID: "TurboGrafx16", RBF: "_Console/TurboGrafx16",
+		Aliases: []string{"TGFX16", "PCEngine", "TurboGrafx-16"},
+		Variants: []mglVariant{
+			{Role: "turbografx", Label: "TurboGrafx", Exts: []string{".bin", ".pce"}, Delay: 1, Type: "f", Index: 0},
+		},
+	},
+	{
+		ID: "TurboGrafx16CD", RBF: "_Console/TurboGrafx16",
+		Aliases: []string{"TGFX16-CD", "PCEngineCD", "TurboGrafx-16 CD"},
+		Variants: []mglVariant{
+			{Role: "cd", Label: "CD", Exts: []string{".cue", ".chd"}, Delay: 1, Type: "s", Index: 0},
+		},
+	},
+	{
+		ID: "TomyTutor", RBF: "_Computer/TomyTutor",
+		Aliases: []string{"Tutor"},
+		Variants: []mglVariant{
+			{Role: "cart", Label: "Cartridge", Exts: []string{".bin"}, Delay: 1, Type: "f", Index: 2},
+			{Role: "tapeimage", Label: "Tape Image", Exts: []string{".cas"}, Delay: 1, Type: "s", Index: 0},
+		},
+	},
+	{
+		ID: "UK101", RBF: "_Computer/UK101",
+		Aliases: []string{"UK101"},
+		Variants: []mglVariant{
+			{Role: "ascii", Label: "ASCII", Exts: []string{".txt", ".bas", ".lod"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "VC4000", RBF: "_Console/VC4000",
+		Aliases: []string{"VC4000"},
+		Variants: []mglVariant{
+			{Role: "cart", Label: "Cartridge", Exts: []string{".bin"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "CreatiVision", RBF: "_Console/CreatiVision",
+		Aliases: []string{"VTech CreatiVision"},
+		Variants: []mglVariant{
+			{Role: "cart", Label: "Cartridge", Exts: []string{".rom", ".bin"}, Delay: 1, Type: "f", Index: 1},
+			{Role: "basic", Label: "BASIC", Exts: []string{".bas"}, Delay: 1, Type: "f", Index: 3},
+		},
+	},
+	{
+		ID: "Vector06C", RBF: "_Computer/Vector-06C",
+		Aliases: []string{"Vector06", "Vector-06C"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".rom", ".com", ".c00", ".edd"}, Delay: 1, Type: "f", Index: 1},
+			{Role: "diska", Label: "Disk A", Exts: []string{".fdd"}, Delay: 1, Type: "s", Index: 0},
+			{Role: "diskb", Label: "Disk B", Exts: []string{".fdd"}, Delay: 1, Type: "s", Index: 1},
+		},
+	},
+	{
+		ID: "Vectrex", RBF: "_Console/Vectrex",
+		Aliases: []string{"Vectrex"},
+		Variants: []mglVariant{
+			{Role: "game", Label: "-", Exts: []string{".vec", ".bin", ".rom"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "WonderSwan", RBF: "_Console/WonderSwan",
+		Aliases: []string{"WonderSwan"},
+		Variants: []mglVariant{
+			{Role: "rom", Label: "ROM", Exts: []string{".ws"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "WonderSwanColor", RBF: "_Console/WonderSwan",
+		Aliases: []string{"WonderSwan Color"},
+		Variants: []mglVariant{
+			{Role: "rom", Label: "ROM", Exts: []string{".wsc"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "X68000", RBF: "_Computer/X68000",
+		Aliases: []string{"X68000"},
+		Variants: []mglVariant{
+			{Role: "floppy1", Label: "FDD0", Exts: []string{".d88"}, Delay: 1, Type: "s", Index: 0},
+			{Role: "floppy2", Label: "FDD1", Exts: []string{".d88"}, Delay: 1, Type: "s", Index: 1},
+			{Role: "hdd", Label: "SASI Hard Disk", Exts: []string{".hdf"}, Delay: 1, Type: "s", Index: 2},
+			{Role: "ram", Label: "RAM", Exts: []string{".ram"}, Delay: 1, Type: "s", Index: 3},
+		},
+	},
+	{
+		ID: "ZXSpectrum", RBF: "_Computer/ZX-Spectrum",
+		Aliases: []string{"Spectrum", "ZX Spectrum"},
+		Variants: []mglVariant{
+			{Role: "disk", Label: "Disk", Exts: []string{".trd", ".img", ".dsk", ".mgt"}, Delay: 1, Type: "s", Index: 0},
+			{Role: "tape", Label: "Tape", Exts: []string{".tap", ".csw", ".tzx"}, Delay: 1, Type: "f", Index: 2},
+			{Role: "snapshot", Label: "Snapshot", Exts: []string{".z80", ".sna"}, Delay: 1, Type: "f", Index: 4},
+			{Role: "divmmc", Label: "DivMMC", Exts: []string{".vhd"}, Delay: 1, Type: "s", Index: 1},
+		},
+	},
+	{
+		ID: "ZXNext", RBF: "_Computer/ZXNext",
+		Aliases: []string{"ZX Spectrum Next"},
+		Variants: []mglVariant{
+			{Role: "c", Label: "C:", Exts: []string{".vhd"}, Delay: 1, Type: "s", Index: 0},
+			{Role: "d", Label: "D:", Exts: []string{".vhd"}, Delay: 1, Type: "s", Index: 1},
+			{Role: "tape", Label: "Tape", Exts: []string{".tzx", ".csw"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
 }
 
 func normalizeSystem(s string) string {
 	s = strings.ToUpper(strings.TrimSpace(s))
-	r := strings.NewReplacer(" ", "", "-", "", "_", "")
+	r := strings.NewReplacer(" ", "", "-", "", "_", "", "/", "", "(", "", ")", "", ".", "", "&", "AND")
 	return r.Replace(s)
 }
 
-func mglConfigForSystem(system string) (mglConfig, bool) {
-	switch normalizeSystem(system) {
-	case "PSX", "PS1", "PLAYSTATION", "PLAYSTATION1":
-		return mglConfig{RBF: "_Console/PSX", GamesDir: "/media/fat/games/PSX", Delay: 1, Type: "s", Index: 1}, true
-	case "SATURN", "SEGASATURN":
-		return mglConfig{RBF: "_Console/Saturn", GamesDir: "/media/fat/games/Saturn", Delay: 1, Type: "s", Index: 0}, true
-	case "SNES", "SUPERNINTENDO", "SUPERFAMICOM", "SFC":
-		return mglConfig{RBF: "_Console/SNES", GamesDir: "/media/fat/games/SNES", Delay: 2, Type: "f", Index: 0}, true
-	default:
-		return mglConfig{}, false
+func findSystemPreset(system string) (*systemPreset, bool) {
+	want := normalizeSystem(system)
+	for i := range systemPresets {
+		p := &systemPresets[i]
+		if normalizeSystem(p.ID) == want {
+			return p, true
+		}
+		for _, a := range p.Aliases {
+			if normalizeSystem(a) == want {
+				return p, true
+			}
+		}
 	}
+	switch want {
+	case "PSX", "PS1", "PLAYSTATION1":
+		return findSystemPreset("Playstation")
+	case "SEGASATURN":
+		return findSystemPreset("Saturn")
+	case "SUPERFAMICOM", "SFC":
+		return findSystemPreset("SNES")
+	case "MEGADRIVE":
+		return findSystemPreset("Genesis")
+	}
+	return nil, false
+}
+
+func extensionMatches(path, pattern string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	pattern = strings.ToLower(strings.TrimSpace(pattern))
+	if pattern == ext {
+		return true
+	}
+	if strings.Contains(pattern, "?") && len(pattern) == len(ext) {
+		for i := range pattern {
+			if pattern[i] != '?' && pattern[i] != ext[i] {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func roleMatches(want string, v mglVariant) bool {
+	want = normalizeSystem(want)
+	if want == "" {
+		return true
+	}
+	if normalizeSystem(v.Role) == want || normalizeSystem(v.Label) == want {
+		return true
+	}
+	switch want {
+	case "FLOPPY", "FLOPPY1", "DISK1", "DRIVEA", "A":
+		return v.Role == "floppy1"
+	case "FLOPPY2", "DISK2", "DRIVEB", "B":
+		return v.Role == "floppy2"
+	case "HDD", "HARDDISK", "HARDDSK":
+		return v.Role == "hdd"
+	case "HDD2", "HARDDISK2":
+		return v.Role == "hdd2"
+	case "CD", "CDROM", "DISC":
+		return v.Role == "cd"
+	case "CART", "CARTRIDGE", "ROM":
+		return v.Role == "cart"
+	case "TAPE", "CASSETTE":
+		return v.Role == "tape"
+	case "SNAPSHOT":
+		return v.Role == "snapshot"
+	}
+	return false
+}
+
+func variantForPath(p *systemPreset, path, role string) (mglVariant, error) {
+	var matches []mglVariant
+	for _, v := range p.Variants {
+		if role != "" && !roleMatches(role, v) {
+			continue
+		}
+		for _, ext := range v.Exts {
+			if extensionMatches(path, ext) {
+				matches = append(matches, v)
+				break
+			}
+		}
+	}
+	if len(matches) == 0 {
+		if role != "" {
+			return mglVariant{}, fmt.Errorf("system %s has no %s slot for %s", p.ID, role, filepath.Ext(path))
+		}
+		return mglVariant{}, fmt.Errorf("system %s does not support %s files", p.ID, filepath.Ext(path))
+	}
+	return matches[0], nil
 }
 
 func xmlEscape(s string) string {
@@ -957,42 +1854,140 @@ func resolveRBF(configured string) string {
 	return configured
 }
 
-func generateMGL(system, romPath string) (string, error) {
-	cfg, ok := mglConfigForSystem(system)
+func validateLaunchPath(path string) (string, error) {
+	if !strings.HasPrefix(path, "/") {
+		return "", fmt.Errorf("launch path must be absolute: %s", path)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("game file not found: %s", path)
+	}
+	if st.IsDir() {
+		return "", fmt.Errorf("launch path is not a file: %s", path)
+	}
+	return filepath.ToSlash(filepath.Clean(path)), nil
+}
+
+func prepareSaturnRAM(ram string) (string, error) {
+	value := byte(0)
+	name := "Saturn_CL_None"
+	switch normalizeSystem(ram) {
+	case "", "NONE":
+	case "1MB", "1M", "DRAM1M":
+		value = 2
+		name = "Saturn_CL_1MB"
+	case "4MB", "4M", "DRAM4M":
+		value = 3
+		name = "Saturn_CL_4MB"
+	default:
+		return "", fmt.Errorf("unsupported Saturn RAM setting %q; use none, 1MB or 4MB", ram)
+	}
+
+	cfg := make([]byte, 16)
+	basePath := "/media/fat/config/Saturn.CFG"
+	if raw, err := os.ReadFile(basePath); err == nil {
+		copy(cfg, raw)
+	}
+	cfg[2] = (cfg[2] & byte(0x1F)) | byte((value&7)<<5)
+
+	configDir := "/media/fat/config"
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		return "", fmt.Errorf("create MiSTer config directory: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, name+".CFG"), cfg, 0644); err != nil {
+		return "", fmt.Errorf("write Saturn RAM profile: %w", err)
+	}
+	return name, nil
+}
+
+func generateMGL(launch Launch) (string, *systemPreset, error) {
+	preset, ok := findSystemPreset(launch.System)
 	if !ok {
-		return "", fmt.Errorf("unsupported MGL system %q", system)
+		return "", nil, fmt.Errorf("unsupported MGL system %q", launch.System)
 	}
-	if !strings.HasPrefix(romPath, "/") {
-		return "", fmt.Errorf("launch path must be absolute: %s", romPath)
+	if normalizeSystem(preset.ID) == "ARCADE" {
+		return "", nil, fmt.Errorf("Arcade cannot be launched through MGL")
 	}
-	if st, err := os.Stat(romPath); err != nil || st.IsDir() {
+	if launch.RAM != "" && normalizeSystem(preset.ID) != "SATURN" {
+		return "", nil, fmt.Errorf("ram is only supported for Saturn")
+	}
+
+	type resolvedFile struct {
+		Path    string
+		Variant mglVariant
+	}
+	var resolved []resolvedFile
+
+	if launch.Path != "" {
+		p, err := validateLaunchPath(launch.Path)
 		if err != nil {
-			return "", fmt.Errorf("game file not found: %s", romPath)
+			return "", nil, err
 		}
-		return "", fmt.Errorf("launch path is not a file: %s", romPath)
+		v, err := variantForPath(preset, p, "")
+		if err != nil {
+			return "", nil, err
+		}
+		resolved = append(resolved, resolvedFile{Path: p, Variant: v})
+	}
+
+	for _, f := range launch.Files {
+		p, err := validateLaunchPath(f.Path)
+		if err != nil {
+			return "", nil, err
+		}
+		v, err := variantForPath(preset, p, f.Role)
+		if err != nil {
+			return "", nil, err
+		}
+		resolved = append(resolved, resolvedFile{Path: p, Variant: v})
+	}
+
+	if len(resolved) == 0 {
+		return "", nil, fmt.Errorf("launch has no files")
+	}
+
+	setName := ""
+	setNameSameDir := false
+	switch normalizeSystem(preset.ID) {
+	case "SATURN":
+		var err error
+		setName, err = prepareSaturnRAM(launch.RAM)
+		if err != nil {
+			return "", nil, err
+		}
+		setNameSameDir = true
+	case "GAMEGEAR":
+		setName = "GameGear"
+	case "GAMEBOYCOLOR":
+		setName = "GBC"
+		setNameSameDir = true
 	}
 
 	tmpDir := filepath.Join(runtimeBase, "tmp")
 	if err := os.MkdirAll(tmpDir, 0755); err != nil {
-		return "", fmt.Errorf("create CollectionLauncher tmp directory: %w", err)
+		return "", nil, fmt.Errorf("create CollectionLauncher tmp directory: %w", err)
 	}
 	mglPath := filepath.Join(tmpDir, "CollectionLauncher.mgl")
 
-	mediaPath := filepath.ToSlash(filepath.Clean(romPath))
 	var b strings.Builder
 	b.WriteString("<mistergamedescription>\n")
-	resolvedRBF := resolveRBF(cfg.RBF)
-	fmt.Fprintf(&b, "<rbf>%s</rbf>\n", xmlEscape(resolvedRBF))
-	fmt.Fprintf(&b, "<file delay=\"%d\" type=\"%s\" index=\"%d\" path=\"%s\"/>\n",
-		cfg.Delay, cfg.Type, cfg.Index, xmlEscape(mediaPath))
-	if cfg.SetName != "" {
-		fmt.Fprintf(&b, "<setname>%s</setname>\n", xmlEscape(cfg.SetName))
+	fmt.Fprintf(&b, "<rbf>%s</rbf>\n", xmlEscape(resolveRBF(preset.RBF)))
+	if setName != "" {
+		if setNameSameDir {
+			fmt.Fprintf(&b, "<setname same_dir=\"1\">%s</setname>\n", xmlEscape(setName))
+		} else {
+			fmt.Fprintf(&b, "<setname>%s</setname>\n", xmlEscape(setName))
+		}
+	}
+	for _, rf := range resolved {
+		fmt.Fprintf(&b, "<file delay=\"%d\" type=\"%s\" index=\"%d\" path=\"%s\"/>\n",
+			rf.Variant.Delay, rf.Variant.Type, rf.Variant.Index, xmlEscape(rf.Path))
 	}
 	b.WriteString("</mistergamedescription>\n")
 	if err := os.WriteFile(mglPath, []byte(b.String()), 0644); err != nil {
-		return "", fmt.Errorf("write temporary MGL: %w", err)
+		return "", nil, fmt.Errorf("write temporary MGL: %w", err)
 	}
-	return mglPath, nil
+	return mglPath, preset, nil
 }
 
 func appendLaunchLog(format string, args ...interface{}) {
@@ -1088,21 +2083,29 @@ func readCoreName() string {
 	return readCoreState().Name
 }
 
-func coreNameMatchesSystem(coreName, system string) bool {
-	name := normalizeSystem(coreName)
-	switch normalizeSystem(system) {
-	case "PSX", "PS1", "PLAYSTATION", "PLAYSTATION1":
-		return strings.HasPrefix(name, "PSX")
-	case "SATURN", "SEGASATURN":
-		return strings.HasPrefix(name, "SATURN")
-	case "SNES", "SUPERNINTENDO", "SUPERFAMICOM", "SFC":
-		return strings.HasPrefix(name, "SNES")
-	default:
+func coreNameMatchesPreset(coreName string, preset *systemPreset) bool {
+	if preset == nil {
 		return false
 	}
+	name := normalizeSystem(coreName)
+	if name == "" {
+		return false
+	}
+	candidates := []string{preset.ID, filepath.Base(preset.RBF)}
+	candidates = append(candidates, preset.Aliases...)
+	for _, c := range candidates {
+		n := normalizeSystem(c)
+		if n != "" && strings.HasPrefix(name, n) {
+			return true
+		}
+	}
+	if normalizeSystem(preset.ID) == "SATURN" && strings.HasPrefix(name, "SATURNCL") {
+		return true
+	}
+	return false
 }
 
-func waitForExpectedCore(system string, before coreState, timeout time.Duration) (string, bool) {
+func waitForExpectedCore(preset *systemPreset, before coreState, timeout time.Duration) (string, bool) {
 	deadline := time.Now().Add(timeout)
 	stableSince := time.Time{}
 	lastName := ""
@@ -1117,7 +2120,7 @@ func waitForExpectedCore(system string, before coreState, timeout time.Duration)
 			}
 		}
 
-		if transitionSeen && coreNameMatchesSystem(now.Name, system) {
+		if transitionSeen && coreNameMatchesPreset(now.Name, preset) {
 			if now.Name != lastName {
 				lastName = now.Name
 				stableSince = time.Now()
@@ -1133,23 +2136,109 @@ func waitForExpectedCore(system string, before coreState, timeout time.Duration)
 	return readCoreName(), false
 }
 
+func isArcadeSystem(system string) bool {
+	switch normalizeSystem(system) {
+	case "ARCADE", "MRA":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateArcadePath(path string) (string, error) {
+	p, err := validateLaunchPath(path)
+	if err != nil {
+		return "", err
+	}
+	if !strings.EqualFold(filepath.Ext(p), ".mra") {
+		return "", fmt.Errorf("Arcade launch path must be an .mra file: %s", path)
+	}
+	return p, nil
+}
+
+func waitForArcadeCore(before coreState, timeout time.Duration) (string, bool) {
+	deadline := time.Now().Add(timeout)
+	stableSince := time.Time{}
+	lastName := ""
+	transitionSeen := false
+
+	for time.Now().Before(deadline) {
+		now := readCoreState()
+		if now.Exists {
+			if !before.Exists || now.Name != before.Name || (!now.ModTime.IsZero() && now.ModTime.After(before.ModTime)) {
+				transitionSeen = true
+			}
+		}
+
+		name := normalizeSystem(now.Name)
+		if transitionSeen && (name == "ARCADE" || strings.HasPrefix(name, "ARCADE")) {
+			if now.Name != lastName {
+				lastName = now.Name
+				stableSince = time.Now()
+			} else if !stableSince.IsZero() && time.Since(stableSince) >= 600*time.Millisecond {
+				return now.Name, true
+			}
+		} else {
+			lastName = now.Name
+			stableSince = time.Time{}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	return readCoreName(), false
+}
+
 func launchEntry(e Entry, music *musicPlayer, fb *framebuffer, term *terminalState) error {
-	if e.Launch.System != "" && e.Launch.Path != "" {
-		appendLaunchLog("selected system=%s path=%s", e.Launch.System, e.Launch.Path)
-		mglPath, err := generateMGL(e.Launch.System, e.Launch.Path)
+	if e.Launch.System != "" && (e.Launch.Path != "" || len(e.Launch.Files) > 0) {
+		if isArcadeSystem(e.Launch.System) {
+			if len(e.Launch.Files) > 0 {
+				return fmt.Errorf("Arcade uses a single MRA path, not launch.files")
+			}
+			if e.Launch.RAM != "" {
+				return fmt.Errorf("ram is not supported for Arcade")
+			}
+
+			mraPath, err := validateArcadePath(e.Launch.Path)
+			if err != nil {
+				appendLaunchLog("Arcade path validation failed: %v", err)
+				return err
+			}
+
+			before := readCoreState()
+			appendLaunchLog("arcade launch mra=%s core_before=%q core_before_mtime=%s", mraPath, before.Name, before.ModTime.Format(time.RFC3339Nano))
+
+			if err = sendMiSTerLoadCore(mraPath); err != nil {
+				appendLaunchLog("Arcade MiSTer handoff failed: %v", err)
+				return err
+			}
+
+			after, switched := waitForArcadeCore(before, 10*time.Second)
+			appendLaunchLog("arcade core_after=%q switched=%v", after, switched)
+			if !switched {
+				return fmt.Errorf("MiSTer did not reach an Arcade core (current %q)", after)
+			}
+
+			music.Stop()
+			term.Restore()
+			fb.close()
+			os.Exit(0)
+		}
+
+		appendLaunchLog("selected system=%s path=%s files=%d ram=%s", e.Launch.System, e.Launch.Path, len(e.Launch.Files), e.Launch.RAM)
+		mglPath, preset, err := generateMGL(e.Launch)
 		if err != nil {
 			appendLaunchLog("MGL generation failed: %v", err)
 			return err
 		}
 		before := readCoreState()
-		appendLaunchLog("launch system=%s path=%s mgl=%s core_before=%q core_before_mtime=%s", e.Launch.System, e.Launch.Path, mglPath, before.Name, before.ModTime.Format(time.RFC3339Nano))
+		appendLaunchLog("launch system=%s mgl=%s core_before=%q core_before_mtime=%s", e.Launch.System, mglPath, before.Name, before.ModTime.Format(time.RFC3339Nano))
 
 		if err = sendMiSTerLoadCore(mglPath); err != nil {
 			appendLaunchLog("MiSTer shell handoff failed: %v", err)
 			return err
 		}
 
-		after, switched := waitForExpectedCore(e.Launch.System, before, 7*time.Second)
+		after, switched := waitForExpectedCore(preset, before, 7*time.Second)
 		appendLaunchLog("core_after=%q expected_system=%s switched=%v", after, e.Launch.System, switched)
 		if !switched {
 			return fmt.Errorf("MiSTer did not reach expected %s core (current %q)", e.Launch.System, after)
