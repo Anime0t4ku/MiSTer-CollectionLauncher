@@ -20,7 +20,7 @@ import (
 	"unsafe"
 )
 
-const version = "0.5.1"
+const version = "0.5.2"
 const defaultBase = "/media/fat/Scripts/.config/CollectionLauncher"
 
 var runtimeBase = defaultBase
@@ -2210,20 +2210,14 @@ func launchEntry(e Entry, music *musicPlayer, fb *framebuffer, term *terminalSta
 				return err
 			}
 
-			before := readCoreState()
-			appendLaunchLog("arcade launch mra=%s core_before=%q core_before_mtime=%s", mraPath, before.Name, before.ModTime.Format(time.RFC3339Nano))
+			appendLaunchLog("arcade launch mra=%s", mraPath)
 
 			if err = sendMiSTerLoadCore(mraPath); err != nil {
 				appendLaunchLog("Arcade MiSTer handoff failed: %v", err)
 				return err
 			}
 
-			after, switched := waitForArcadeCore(before, 10*time.Second)
-			appendLaunchLog("arcade core_after=%q switched=%v", after, switched)
-			if !switched {
-				return fmt.Errorf("MiSTer did not reach an Arcade core (current %q)", after)
-			}
-
+			appendLaunchLog("arcade handoff accepted, exiting CollectionLauncher")
 			music.Stop()
 			term.Restore()
 			fb.close()
