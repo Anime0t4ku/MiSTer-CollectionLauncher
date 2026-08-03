@@ -20,7 +20,7 @@ import (
 	"unsafe"
 )
 
-const version = "0.5.0"
+const version = "0.5.1"
 const defaultBase = "/media/fat/Scripts/.config/CollectionLauncher"
 
 var runtimeBase = defaultBase
@@ -398,6 +398,16 @@ func absPath(c *Collection, p string) string {
 	return filepath.Join(c.Dir, p)
 }
 
+func hideTerminalCursor() *os.File {
+	tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0)
+	if err != nil {
+		_, _ = os.Stdout.WriteString("\x1b[?25l")
+		return nil
+	}
+	_, _ = tty.WriteString("\x1b[?25l")
+	return tty
+}
+
 type terminalState struct {
 	fd   uintptr
 	orig syscall.Termios
@@ -405,12 +415,8 @@ type terminalState struct {
 	tty  *os.File
 }
 
-func silenceTerminal() *terminalState {
-	state := &terminalState{}
-	if tty, err := os.OpenFile("/dev/tty", os.O_WRONLY, 0); err == nil {
-		state.tty = tty
-		_, _ = tty.WriteString("\x1b[?25l")
-	}
+func silenceTerminal(tty *os.File) *terminalState {
+	state := &terminalState{tty: tty}
 
 	fd := os.Stdin.Fd()
 	var t syscall.Termios
@@ -604,13 +610,13 @@ func drawEmpty(fb *framebuffer) {
 	white := color.RGBA{240, 240, 240, 255}
 	gray := color.RGBA{180, 180, 180, 255}
 	s := 4
-	title := "GAME LAUNCHER"
+	title := "COLLECTION LAUNCHER"
 	fb.text((fb.w-textWidth(s, title))/2, fb.h/3, s, title, white)
 	s = 3
 	msg := "NO GAME COLLECTIONS FOUND"
 	fb.text((fb.w-textWidth(s, msg))/2, fb.h/2, s, msg, white)
 	s = 2
-	p := "ADD COLLECTIONS TO SCRIPTS/.CONFIG/GAMELAUNCHER/COLLECTIONS"
+	p := "ADD COLLECTIONS TO SCRIPTS/.CONFIG/COLLECTIONLAUNCHER/COLLECTIONS"
 	fb.text((fb.w-textWidth(s, p))/2, fb.h/2+55, s, p, gray)
 	b := "B / ESC  EXIT"
 	fb.text((fb.w-textWidth(s, b))/2, fb.h-80, s, b, gray)
@@ -621,7 +627,7 @@ func drawBrowser(fb *framebuffer, cs []*Collection, sel int) {
 	white := color.RGBA{245, 245, 245, 255}
 	gray := color.RGBA{155, 155, 155, 255}
 	hi := color.RGBA{255, 255, 255, 255}
-	title := "GAME LAUNCHER"
+	title := "COLLECTION LAUNCHER"
 	fb.text((fb.w-textWidth(4, title))/2, 60, 4, title, white)
 	startY := 150
 	rowH := 50
@@ -2382,6 +2388,14 @@ func runGameMenu(fb *framebuffer, acts <-chan action, term *terminalState, c *Co
 }
 
 func main() {
+	earlyTTY := hideTerminalCursor()
+	defer func() {
+		if earlyTTY != nil {
+			_, _ = earlyTTY.WriteString("\x1b[?25h")
+			_ = earlyTTY.Close()
+		}
+	}()
+
 	base := defaultBase
 	if v := os.Getenv("GAMELAUNCHER_BASE"); v != "" {
 		base = v
@@ -2410,7 +2424,8 @@ func main() {
 		os.Exit(1)
 	}
 	defer fb.close()
-	term := silenceTerminal()
+	term := silenceTerminal(earlyTTY)
+	earlyTTY = nil
 	defer term.Restore()
 	acts := make(chan action, 16)
 	done := make(chan struct{})
