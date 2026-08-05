@@ -1,0 +1,70 @@
+name: Build CollectionLauncher
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Build CollectionLauncher
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: arm
+          GOARM: 7
+        run: |
+          mkdir -p build/Scripts/.config/CollectionLauncher
+          go build -trimpath -ldflags="-s -w" \
+            -o build/Scripts/.config/CollectionLauncher/collection_launcher \
+            main.go
+          cp Scripts/CollectionLauncher.sh build/Scripts/CollectionLauncher.sh
+          chmod +x build/Scripts/CollectionLauncher.sh
+          chmod +x build/Scripts/.config/CollectionLauncher/collection_launcher
+
+      - name: Create release package
+        working-directory: build
+        run: zip -r ../CollectionLauncher.zip Scripts
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CollectionLauncher
+          path: CollectionLauncher.zip
+
+      - name: Update Pre-release tag
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        run: |
+          git tag -f Pre-release "$GITHUB_SHA"
+          git push origin Pre-release --force
+
+      - name: Update Pre-release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: ncipollo/release-action@v1
+        with:
+          tag: Pre-release
+          name: Pre-release
+          prerelease: true
+          allowUpdates: true
+          removeArtifacts: true
+          replacesArtifacts: true
+          artifacts: CollectionLauncher.zip
+          token: ${{ secrets.GITHUB_TOKEN }}
