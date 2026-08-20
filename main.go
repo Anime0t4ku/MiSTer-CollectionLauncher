@@ -8,92 +8,80 @@ import (
 	"image/color"
 	_ "image/jpeg"
 	_ "image/png"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
 )
 
-const version = "0.5.2"
+const version = "1.0.0"
 const defaultBase = "/media/fat/Scripts/.config/CollectionLauncher"
 
 var runtimeBase = defaultBase
 
-var faceMapMu sync.Mutex
-var faceConfirmCode uint16
-var faceBackCode uint16
+var imageCacheMu sync.RWMutex
+var imageCache = map[string]image.Image{}
 
-type faceMapping struct {
-	Confirm uint16 `json:"confirm"`
-	Back    uint16 `json:"back"`
-}
-
-func faceMappingPath() string {
-	return filepath.Join(runtimeBase, "controller.json")
-}
-
-func loadFaceMapping() {
-	b, err := os.ReadFile(faceMappingPath())
+func loadCachedImage(path string) (image.Image, error) {
+	if path == "" {
+		return nil, nil
+	}
+	imageCacheMu.RLock()
+	img, ok := imageCache[path]
+	imageCacheMu.RUnlock()
+	if ok {
+		return img, nil
+	}
+	img, err := loadImage(path)
 	if err != nil {
-		return
+		return nil, err
 	}
-	var m faceMapping
-	if json.Unmarshal(b, &m) == nil && (m.Confirm == btnSouth || m.Confirm == btnEast) {
-		faceMapMu.Lock()
-		faceConfirmCode = m.Confirm
-		faceBackCode = m.Back
-		faceMapMu.Unlock()
-		appendLaunchLog("controller mapping loaded confirm=%d back=%d", m.Confirm, m.Back)
+	imageCacheMu.Lock()
+	imageCache[path] = img
+	imageCacheMu.Unlock()
+	return img, nil
+}
+
+func preloadCollectionChrome(cs []*Collection) {
+	for _, c := range cs {
+		if c.Wallpaper != "" {
+			_, _ = loadCachedImage(absPath(c, c.Wallpaper))
+		}
+		if c.Logo != "" {
+			_, _ = loadCachedImage(absPath(c, c.Logo))
+		}
 	}
 }
 
-func resolveFaceButton(code uint16) action {
-	faceMapMu.Lock()
-	defer faceMapMu.Unlock()
-	if faceConfirmCode == 0 {
-		faceConfirmCode = code
-		if code == btnSouth {
-			faceBackCode = btnEast
-		} else {
-			faceBackCode = btnSouth
-		}
-		m := faceMapping{Confirm: faceConfirmCode, Back: faceBackCode}
-		if b, err := json.MarshalIndent(m, "", "  "); err == nil {
-			_ = os.WriteFile(faceMappingPath(), b, 0644)
-		}
-		appendLaunchLog("controller mapping learned confirm=%d back=%d", faceConfirmCode, faceBackCode)
-	}
-	if code == faceConfirmCode {
-		return actConfirm
-	}
-	if code == faceBackCode {
-		return actBack
-	}
-	return actNone
-}
+var swapABInput atomic.Bool
+var swapXYInput atomic.Bool
 
 const (
-	evKey    = 1
-	evAbs    = 3
-	keyEsc   = 1
-	keyEnter = 28
-	keyUp    = 103
-	keyLeft  = 105
-	keyRight = 106
-	keyDown  = 108
-	keyBack  = 158
-	btnSouth = 304
-	btnEast  = 305
-	btnStart = 315
-	btnMode  = 316
-	absHatX  = 16
-	absHatY  = 17
+	evKey     = 1
+	evAbs     = 3
+	keyEsc    = 1
+	keyTab    = 15
+	keyEnter  = 28
+	keyUp     = 103
+	keyLeft   = 105
+	keyRight  = 106
+	keyDown   = 108
+	keyBack   = 158
+	btnSouth  = 304
+	btnEast   = 305
+	btnNorth  = 307
+	btnWest   = 308
+	btnSelect = 314
+	btnStart  = 315
+	btnMode   = 316
+	absHatX   = 16
+	absHatY   = 17
 )
 
 type LaunchFile struct {
@@ -125,6 +113,30 @@ type Collection struct {
 	Dir       string  `json:"-"`
 }
 
+type Config struct {
+	SwapAB          bool `json:"swap_ab"`
+	SwapXY          bool `json:"swap_xy"`
+	BackgroundAudio bool `json:"background_audio"`
+}
+
+func configPath() string { return filepath.Join(runtimeBase, "config.json") }
+
+func loadConfig() Config {
+	cfg := Config{BackgroundAudio: true}
+	b, err := os.ReadFile(configPath())
+	if err == nil {
+		_ = json.Unmarshal(b, &cfg)
+	}
+	return cfg
+}
+
+func saveConfig(cfg Config) {
+	b, err := json.MarshalIndent(cfg, "", "  ")
+	if err == nil {
+		_ = os.WriteFile(configPath(), b, 0644)
+	}
+}
+
 type inputEvent struct {
 	Time  syscall.Timeval
 	Type  uint16
@@ -143,6 +155,9 @@ const (
 	actConfirm
 	actBack
 	actHome
+	actSettings
+	actX
+	actY
 )
 
 type fbVar struct {
@@ -163,7 +178,8 @@ type fbVar struct {
 
 type framebuffer struct {
 	f                 *os.File
-	data              []byte
+	data              []byte // off-screen drawing buffer
+	mapped            []byte // /dev/fb0 mmap
 	w, h, stride, bpp int
 }
 
@@ -191,21 +207,38 @@ func openFramebuffer() (*framebuffer, error) {
 		f.Close()
 		return nil, err
 	}
-	return &framebuffer{f: f, data: data, w: int(v.Xres), h: int(v.Yres), stride: stride, bpp: bpp}, nil
+	back := make([]byte, len(data))
+	copy(back, data)
+	return &framebuffer{f: f, data: back, mapped: data, w: int(v.Xres), h: int(v.Yres), stride: stride, bpp: bpp}, nil
 }
 
 func (fb *framebuffer) close() {
 	if fb == nil {
 		return
 	}
-	if fb.data != nil {
-		_ = syscall.Munmap(fb.data)
-		fb.data = nil
+	if fb.mapped != nil {
+		_ = syscall.Munmap(fb.mapped)
+		fb.mapped = nil
 	}
+	fb.data = nil
 	if fb.f != nil {
 		_ = fb.f.Close()
 		fb.f = nil
 	}
+}
+
+func (fb *framebuffer) present() {
+	if fb == nil || len(fb.mapped) == 0 || len(fb.data) == 0 {
+		return
+	}
+	n := fb.h * fb.stride
+	if n > len(fb.data) {
+		n = len(fb.data)
+	}
+	if n > len(fb.mapped) {
+		n = len(fb.mapped)
+	}
+	copy(fb.mapped[:n], fb.data[:n])
 }
 
 func (fb *framebuffer) put(x, y int, c color.RGBA) {
@@ -225,13 +258,7 @@ func (fb *framebuffer) put(x, y int, c color.RGBA) {
 	}
 }
 
-func (fb *framebuffer) fill(c color.RGBA) {
-	for y := 0; y < fb.h; y++ {
-		for x := 0; x < fb.w; x++ {
-			fb.put(x, y, c)
-		}
-	}
-}
+func (fb *framebuffer) fill(c color.RGBA) { fb.rect(0, 0, fb.w, fb.h, c) }
 
 func loadImage(path string) (image.Image, error) {
 	f, err := os.Open(path)
@@ -294,10 +321,48 @@ func (fb *framebuffer) drawImage(img image.Image, dx, dy, dw, dh int, contain bo
 }
 
 func (fb *framebuffer) rect(x, y, w, h int, c color.RGBA) {
-	for yy := y; yy < y+h; yy++ {
-		for xx := x; xx < x+w; xx++ {
-			fb.put(xx, yy, c)
+	if fb == nil || w <= 0 || h <= 0 {
+		return
+	}
+	if x < 0 {
+		w += x
+		x = 0
+	}
+	if y < 0 {
+		h += y
+		y = 0
+	}
+	if x+w > fb.w {
+		w = fb.w - x
+	}
+	if y+h > fb.h {
+		h = fb.h - y
+	}
+	if w <= 0 || h <= 0 {
+		return
+	}
+
+	row := make([]byte, w*fb.bpp)
+	if fb.bpp == 4 {
+		for i := 0; i < len(row); i += 4 {
+			row[i] = c.B
+			row[i+1] = c.G
+			row[i+2] = c.R
+			row[i+3] = 0xff
 		}
+	} else {
+		v := uint16(c.R>>3)<<11 | uint16(c.G>>2)<<5 | uint16(c.B>>3)
+		lo, hi := byte(v), byte(v>>8)
+		for i := 0; i < len(row); i += 2 {
+			row[i] = lo
+			row[i+1] = hi
+		}
+	}
+
+	start := y*fb.stride + x*fb.bpp
+	for yy := 0; yy < h; yy++ {
+		off := start + yy*fb.stride
+		copy(fb.data[off:off+len(row)], row)
 	}
 }
 func (fb *framebuffer) border(x, y, w, h, t int, c color.RGBA) {
@@ -454,28 +519,27 @@ func (t *terminalState) Restore() {
 
 func inputLoop(ch chan<- action, done <-chan struct{}) {
 	matches, _ := filepath.Glob("/dev/input/event*")
-	var wg sync.WaitGroup
 	var emitMu sync.Mutex
-	lastAction := actNone
-	lastAt := time.Time{}
-	emit := func(a action) {
+	last := map[action]time.Time{}
+	lastFaceAt := time.Time{}
+	emit := func(a action, face bool) {
 		if a == actNone {
 			return
 		}
-		emitMu.Lock()
 		now := time.Now()
-
-		if a == lastAction && now.Sub(lastAt) < 300*time.Millisecond {
+		emitMu.Lock()
+		if face && !lastFaceAt.IsZero() && now.Sub(lastFaceAt) < 220*time.Millisecond {
 			emitMu.Unlock()
 			return
 		}
-
-		if lastAction == actConfirm && a == actBack && now.Sub(lastAt) < 180*time.Millisecond {
+		if face {
+			lastFaceAt = now
+		}
+		if t, ok := last[a]; ok && now.Sub(t) < 140*time.Millisecond {
 			emitMu.Unlock()
 			return
 		}
-		lastAction = a
-		lastAt = now
+		last[a] = now
 		emitMu.Unlock()
 		select {
 		case ch <- a:
@@ -487,15 +551,16 @@ func inputLoop(ch chan<- action, done <-chan struct{}) {
 		if err != nil {
 			continue
 		}
+		misterMap := loadMisterControllerMap(p)
 		const eviocgrab = 0x40044590
 		_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(eviocgrab), uintptr(1))
-		wg.Add(1)
-		go func(f *os.File) {
-			defer wg.Done()
-			defer f.Close()
-			var hatX int32
-			var hatY int32
-			pressed := make(map[uint16]bool)
+		go func(f *os.File, misterMap *misterControllerMap) {
+			defer func() {
+				_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(eviocgrab), uintptr(0))
+				f.Close()
+			}()
+			var hx, hy int32
+			pressed := map[uint16]bool{}
 			for {
 				select {
 				case <-done:
@@ -503,14 +568,17 @@ func inputLoop(ch chan<- action, done <-chan struct{}) {
 				default:
 				}
 				var ev inputEvent
-				err := binary.Read(f, binary.LittleEndian, &ev)
-				if err != nil {
-					if err != io.EOF {
-						time.Sleep(50 * time.Millisecond)
-					}
+				if binary.Read(f, binary.LittleEndian, &ev) != nil {
 					return
 				}
-				var a action
+				if misterMap != nil {
+					if a, handled, face := misterMap.process(f, ev); handled {
+						emit(a, face)
+						continue
+					}
+				}
+				a := actNone
+				face := false
 				if ev.Type == evKey {
 					if ev.Value == 0 {
 						pressed[ev.Code] = false
@@ -525,28 +593,56 @@ func inputLoop(ch chan<- action, done <-chan struct{}) {
 							a = actUp
 						case keyDown:
 							a = actDown
-						case keyEnter, btnStart:
+						case keyEnter:
 							a = actConfirm
+						case keyTab, btnSelect:
+							a = actSettings
 						case keyEsc, keyBack:
 							a = actBack
 						case btnMode:
 							a = actHome
-						case btnSouth, btnEast:
-							a = resolveFaceButton(ev.Code)
+						case btnSouth:
+							if swapABInput.Load() {
+								a = actConfirm
+							} else {
+								a = actBack
+							}
+							face = true
+						case btnEast:
+							if swapABInput.Load() {
+								a = actBack
+							} else {
+								a = actConfirm
+							}
+							face = true
+						case btnWest:
+							if swapXYInput.Load() {
+								a = actY
+							} else {
+								a = actX
+							}
+							face = true
+						case btnNorth:
+							if swapXYInput.Load() {
+								a = actX
+							} else {
+								a = actY
+							}
+							face = true
 						}
 					}
 				}
 				if ev.Type == evAbs {
-					if ev.Code == absHatX && ev.Value != hatX {
-						hatX = ev.Value
+					if ev.Code == absHatX && ev.Value != hx {
+						hx = ev.Value
 						if ev.Value < 0 {
 							a = actLeft
 						} else if ev.Value > 0 {
 							a = actRight
 						}
 					}
-					if ev.Code == absHatY && ev.Value != hatY {
-						hatY = ev.Value
+					if ev.Code == absHatY && ev.Value != hy {
+						hy = ev.Value
 						if ev.Value < 0 {
 							a = actUp
 						} else if ev.Value > 0 {
@@ -554,11 +650,10 @@ func inputLoop(ch chan<- action, done <-chan struct{}) {
 						}
 					}
 				}
-				emit(a)
+				emit(a, face)
 			}
-		}(f)
+		}(f, misterMap)
 	}
-	wg.Wait()
 }
 
 type musicPlayer struct {
@@ -620,6 +715,7 @@ func drawEmpty(fb *framebuffer) {
 	fb.text((fb.w-textWidth(s, p))/2, fb.h/2+55, s, p, gray)
 	b := "B / ESC  EXIT"
 	fb.text((fb.w-textWidth(s, b))/2, fb.h-80, s, b, gray)
+	fb.present()
 }
 
 func drawBrowser(fb *framebuffer, cs []*Collection, sel int) {
@@ -627,11 +723,14 @@ func drawBrowser(fb *framebuffer, cs []*Collection, sel int) {
 	white := color.RGBA{245, 245, 245, 255}
 	gray := color.RGBA{155, 155, 155, 255}
 	hi := color.RGBA{255, 255, 255, 255}
-	title := "COLLECTION LAUNCHER"
-	fb.text((fb.w-textWidth(4, title))/2, 60, 4, title, white)
-	startY := 150
+	title := fmt.Sprintf("Collection Launcher v%s", version)
+	fb.text(36, 28, 3, title, white)
+	startY := 120
 	rowH := 50
-	maxRows := (fb.h - startY - 100) / rowH
+	maxRows := (fb.h - startY - 105) / rowH
+	if maxRows < 1 {
+		maxRows = 1
+	}
 	first := sel - maxRows/2
 	if first < 0 {
 		first = 0
@@ -645,17 +744,79 @@ func drawBrowser(fb *framebuffer, cs []*Collection, sel int) {
 	for i := first; i < len(cs) && i < first+maxRows; i++ {
 		y := startY + (i-first)*rowH
 		c := gray
-		prefix := "  "
 		if i == sel {
-
 			fb.rect(72, y-9, fb.w-144, 40, color.RGBA{36, 36, 44, 255})
 			fb.border(72, y-9, fb.w-144, 40, 3, hi)
 			c = hi
-			prefix = "> "
 		}
-		fb.text(100, y, 3, prefix+cs[i].Title, c)
+		fb.text(100, y, 3, cs[i].Title, c)
 	}
-	fb.text(100, fb.h-60, 2, "DPAD  SELECT     A  OPEN     B  EXIT", gray)
+	// Keep app controls anchored to the bottom, matching MiSTer Hi-Fi.
+	fb.rect(0, fb.h-78, fb.w, 78, color.RGBA{0, 0, 0, 255})
+	footer := "DPAD  NAVIGATE     A  OPEN     SELECT  SETTINGS     B  EXIT"
+	fb.text((fb.w-textWidth(2, footer))/2, fb.h-47, 2, footer, gray)
+	fb.present()
+}
+
+func drawSettings(fb *framebuffer, cfg Config, sel int) {
+	fb.fill(color.RGBA{10, 10, 14, 255})
+	white := color.RGBA{245, 245, 245, 255}
+	gray := color.RGBA{165, 165, 170, 255}
+	fb.text(36, 28, 3, fmt.Sprintf("Collection Launcher v%s", version), white)
+	fb.text(72, 92, 4, "SETTINGS", white)
+	labels := []string{"SWAP A/B", "SWAP X/Y", "BACKGROUND AUDIO"}
+	values := []bool{cfg.SwapAB, cfg.SwapXY, cfg.BackgroundAudio}
+	for i, label := range labels {
+		y := 175 + i*72
+		if i == sel {
+			fb.rect(72, y-15, fb.w-144, 54, color.RGBA{36, 36, 44, 255})
+			fb.border(72, y-15, fb.w-144, 54, 3, white)
+		}
+		fb.text(100, y, 3, label, white)
+		v := "DISABLED"
+		if values[i] {
+			v = "ENABLED"
+		}
+		fb.text(fb.w-100-textWidth(3, v), y, 3, v, gray)
+	}
+	desc := "DISABLE BACKGROUND AUDIO TO IGNORE MUSIC DEFINED BY COLLECTION JSON FILES"
+	fb.text((fb.w-textWidth(2, desc))/2, 175+3*72, 2, desc, gray)
+	fb.rect(0, fb.h-78, fb.w, 78, color.RGBA{0, 0, 0, 255})
+	footer := "DPAD  CHANGE     A  TOGGLE     B / SELECT  BACK"
+	fb.text((fb.w-textWidth(2, footer))/2, fb.h-47, 2, footer, gray)
+	fb.present()
+}
+
+func runSettings(fb *framebuffer, acts <-chan action, cfg *Config) {
+	sel := 0
+	drawSettings(fb, *cfg, sel)
+	settleInput(acts, 120*time.Millisecond)
+	for a := range acts {
+		switch a {
+		case actUp:
+			sel = (sel - 1 + 3) % 3
+		case actDown:
+			sel = (sel + 1) % 3
+		case actLeft, actRight, actConfirm:
+			switch sel {
+			case 0:
+				cfg.SwapAB = !cfg.SwapAB
+				swapABInput.Store(cfg.SwapAB)
+			case 1:
+				cfg.SwapXY = !cfg.SwapXY
+				swapXYInput.Store(cfg.SwapXY)
+			case 2:
+				cfg.BackgroundAudio = !cfg.BackgroundAudio
+			}
+			saveConfig(*cfg)
+		case actBack, actSettings:
+			saveConfig(*cfg)
+			return
+		default:
+			continue
+		}
+		drawSettings(fb, *cfg, sel)
+	}
 }
 
 type imageRect struct {
@@ -665,20 +826,28 @@ type imageRect struct {
 	h int
 }
 
+type cachedViewport struct {
+	base  []byte
+	rects map[int]imageRect
+}
+
 type collectionView struct {
-	c              *Collection
-	base           []byte
-	cardX          []int
-	cardY          int
-	cardW          int
-	cardH          int
-	artRects       []imageRect
-	artworks       []image.Image
-	wallpaper      image.Image
-	logo           image.Image
-	viewportBase   []byte
-	viewportStart  int
-	viewportRects  map[int]imageRect
+	c             *Collection
+	base          []byte
+	cardX         []int
+	cardY         int
+	cardW         int
+	cardH         int
+	artRects      []imageRect
+	artworks      []image.Image
+	wallpaper     image.Image
+	logo          image.Image
+	viewportBase  []byte
+	viewportStart int
+	viewportRects map[int]imageRect
+	viewportMu    sync.RWMutex
+	viewportCache map[int]cachedViewport
+	viewportBusy  map[int]bool
 }
 
 func captureVisible(fb *framebuffer) []byte {
@@ -719,14 +888,11 @@ func containedImageRect(img image.Image, dx, dy, dw, dh int) imageRect {
 
 func prepareCollectionView(fb *framebuffer, c *Collection) *collectionView {
 	v := &collectionView{c: c}
-	v.wallpaper, _ = loadImage(absPath(c, c.Wallpaper))
+	v.wallpaper, _ = loadCachedImage(absPath(c, c.Wallpaper))
 	if c.Logo != "" {
-		v.logo, _ = loadImage(absPath(c, c.Logo))
+		v.logo, _ = loadCachedImage(absPath(c, c.Logo))
 	}
 	v.artworks = make([]image.Image, len(c.Entries))
-	for i, e := range c.Entries {
-		v.artworks[i], _ = loadImage(absPath(c, e.Artwork))
-	}
 
 	if v.wallpaper != nil {
 		fb.drawImage(v.wallpaper, 0, 0, fb.w, fb.h, false)
@@ -777,18 +943,24 @@ func prepareCollectionView(fb *framebuffer, c *Collection) *collectionView {
 	if v.cardH < 100 {
 		v.cardH = 100
 	}
-	v.cardY = (usableH-v.cardH)/2
+	v.cardY = (usableH - v.cardH) / 2
 
 	fb.rect(0, fb.h-100, fb.w, 100, color.RGBA{0, 0, 0, 255})
 	v.base = captureVisible(fb)
+	// Show the collection background immediately; artwork decoding no longer blocks it.
+	fb.present()
+	for i, e := range c.Entries {
+		v.artworks[i], _ = loadCachedImage(absPath(c, e.Artwork))
+	}
 	v.viewportStart = -1
 	v.viewportRects = make(map[int]imageRect)
+	v.viewportCache = make(map[int]cachedViewport)
+	v.viewportBusy = make(map[int]bool)
 	return v
 }
 
-
 func drawChevron(fb *framebuffer, centerX, centerY, size, thickness int, right bool, c color.RGBA) {
-	for t := -thickness / 2; t <= thickness / 2; t++ {
+	for t := -thickness / 2; t <= thickness/2; t++ {
 		for i := 0; i < size; i++ {
 			var x int
 			if right {
@@ -804,12 +976,8 @@ func drawChevron(fb *framebuffer, centerX, centerY, size, thickness int, right b
 	}
 }
 
-func drawCollectionSelection(fb *framebuffer, v *collectionView, sel int, windowStart int) {
+func normalizedViewportStart(v *collectionView, windowStart int) (int, int) {
 	n := len(v.c.Entries)
-	if sel < 0 || sel >= n {
-		return
-	}
-
 	visibleCount := n
 	if visibleCount > 3 {
 		visibleCount = 3
@@ -824,63 +992,139 @@ func drawCollectionSelection(fb *framebuffer, v *collectionView, sel int, window
 	if windowStart > maxStart {
 		windowStart = maxStart
 	}
+	return windowStart, visibleCount
+}
 
-	if v.viewportBase == nil || v.viewportStart != windowStart {
-		restoreVisible(fb, v.base)
-		v.viewportRects = make(map[int]imageRect)
+func renderViewport(fb *framebuffer, v *collectionView, windowStart int) cachedViewport {
+	windowStart, visibleCount := normalizedViewportStart(v, windowStart)
+	n := len(v.c.Entries)
 
-		gap := fb.w / 40
-		cardW := v.cardW
-		total := visibleCount*cardW + (visibleCount-1)*gap
-		maxTotal := fb.w * 4 / 5
-		if total > maxTotal {
-			cardW = (maxTotal - (visibleCount-1)*gap) / visibleCount
-			if cardW < 100 {
-				cardW = 100
-			}
-			total = visibleCount*cardW + (visibleCount-1)*gap
-		}
-		startX := (fb.w - total) / 2
+	tmp := &framebuffer{
+		data:   make([]byte, len(v.base)),
+		w:      fb.w,
+		h:      fb.h,
+		stride: fb.stride,
+		bpp:    fb.bpp,
+	}
+	copy(tmp.data, v.base)
+	rects := make(map[int]imageRect)
 
-		for slot := 0; slot < visibleCount; slot++ {
-			entryIndex := windowStart + slot
-			if entryIndex >= n {
-				break
-			}
-			x := startX + slot*(cardW+gap)
-			r := imageRect{x: x, y: v.cardY, w: cardW, h: v.cardH}
-			if v.artworks[entryIndex] != nil {
-				r = containedImageRect(v.artworks[entryIndex], x, v.cardY, cardW, v.cardH)
-				fb.drawImage(v.artworks[entryIndex], x, v.cardY, cardW, v.cardH, true)
-			}
-			v.viewportRects[entryIndex] = r
+	gap := tmp.w / 40
+	cardW := v.cardW
+	total := visibleCount*cardW + (visibleCount-1)*gap
+	maxTotal := tmp.w * 4 / 5
+	if total > maxTotal {
+		cardW = (maxTotal - (visibleCount-1)*gap) / visibleCount
+		if cardW < 100 {
+			cardW = 100
 		}
+		total = visibleCount*cardW + (visibleCount-1)*gap
+	}
+	startX := (tmp.w - total) / 2
 
-		arrowY := v.cardY + v.cardH/2
-		arrowSize := fb.h / 10
-		if arrowSize > 90 {
-			arrowSize = 90
+	for slot := 0; slot < visibleCount; slot++ {
+		entryIndex := windowStart + slot
+		if entryIndex >= n {
+			break
 		}
-		if arrowSize < 40 {
-			arrowSize = 40
+		x := startX + slot*(cardW+gap)
+		r := imageRect{x: x, y: v.cardY, w: cardW, h: v.cardH}
+		if v.artworks[entryIndex] != nil {
+			r = containedImageRect(v.artworks[entryIndex], x, v.cardY, cardW, v.cardH)
+			tmp.drawImage(v.artworks[entryIndex], x, v.cardY, cardW, v.cardH, true)
 		}
-		arrowThickness := 7
-
-		if windowStart > 0 {
-			drawChevron(fb, startX/2, arrowY, arrowSize, arrowThickness, false, color.RGBA{255, 255, 255, 255})
-		}
-		if windowStart+visibleCount < n {
-			rightSpaceStart := startX + total
-			drawChevron(fb, rightSpaceStart+(fb.w-rightSpaceStart)/2, arrowY, arrowSize, arrowThickness, true, color.RGBA{255, 255, 255, 255})
-		}
-
-		v.viewportBase = captureVisible(fb)
-		v.viewportStart = windowStart
-	} else {
-		restoreVisible(fb, v.viewportBase)
+		rects[entryIndex] = r
 	}
 
-	r, ok := v.viewportRects[sel]
+	arrowY := v.cardY + v.cardH/2
+	arrowSize := tmp.h / 10
+	if arrowSize > 90 {
+		arrowSize = 90
+	}
+	if arrowSize < 40 {
+		arrowSize = 40
+	}
+	arrowThickness := 7
+
+	if windowStart > 0 {
+		drawChevron(tmp, startX/2, arrowY, arrowSize, arrowThickness, false, color.RGBA{255, 255, 255, 255})
+	}
+	if windowStart+visibleCount < n {
+		rightSpaceStart := startX + total
+		drawChevron(tmp, rightSpaceStart+(tmp.w-rightSpaceStart)/2, arrowY, arrowSize, arrowThickness, true, color.RGBA{255, 255, 255, 255})
+	}
+
+	return cachedViewport{base: captureVisible(tmp), rects: rects}
+}
+
+func getViewport(fb *framebuffer, v *collectionView, windowStart int) cachedViewport {
+	windowStart, _ = normalizedViewportStart(v, windowStart)
+	v.viewportMu.RLock()
+	cached, ok := v.viewportCache[windowStart]
+	v.viewportMu.RUnlock()
+	if ok {
+		return cached
+	}
+	cached = renderViewport(fb, v, windowStart)
+	v.viewportMu.Lock()
+	v.viewportCache[windowStart] = cached
+	delete(v.viewportBusy, windowStart)
+	v.viewportMu.Unlock()
+	return cached
+}
+
+func preloadViewport(fb *framebuffer, v *collectionView, windowStart int) {
+	windowStart, _ = normalizedViewportStart(v, windowStart)
+	v.viewportMu.Lock()
+	if _, ok := v.viewportCache[windowStart]; ok || v.viewportBusy[windowStart] {
+		v.viewportMu.Unlock()
+		return
+	}
+	v.viewportBusy[windowStart] = true
+	v.viewportMu.Unlock()
+
+	go func(start int) {
+		cached := renderViewport(fb, v, start)
+		v.viewportMu.Lock()
+		v.viewportCache[start] = cached
+		delete(v.viewportBusy, start)
+		v.viewportMu.Unlock()
+	}(windowStart)
+}
+
+func preloadNeighborViewports(fb *framebuffer, v *collectionView, windowStart int) {
+	windowStart, visibleCount := normalizedViewportStart(v, windowStart)
+	maxStart := len(v.c.Entries) - visibleCount
+	if maxStart <= 0 {
+		return
+	}
+	if windowStart > 0 {
+		preloadViewport(fb, v, windowStart-1)
+	} else {
+		// Warm the wrap-around viewport for Left on the first entry.
+		preloadViewport(fb, v, maxStart)
+	}
+	if windowStart < maxStart {
+		preloadViewport(fb, v, windowStart+1)
+	} else {
+		// Warm the wrap-around viewport for Right on the last entry.
+		preloadViewport(fb, v, 0)
+	}
+}
+
+func drawCollectionSelection(fb *framebuffer, v *collectionView, sel int, windowStart int) {
+	n := len(v.c.Entries)
+	if sel < 0 || sel >= n {
+		return
+	}
+	windowStart, _ = normalizedViewportStart(v, windowStart)
+	cached := getViewport(fb, v, windowStart)
+	restoreVisible(fb, cached.base)
+	v.viewportStart = windowStart
+	v.viewportBase = cached.base
+	v.viewportRects = cached.rects
+
+	r, ok := cached.rects[sel]
 	if !ok {
 		return
 	}
@@ -891,6 +1135,12 @@ func drawCollectionSelection(fb *framebuffer, v *collectionView, sel int, window
 	fb.text((fb.w-textWidth(3, label))/2, fb.h-86, 3, label, color.RGBA{255, 255, 255, 255})
 	help := "DPAD  SELECT     A  LAUNCH     B  BACK"
 	fb.text((fb.w-textWidth(2, help))/2, fb.h-42, 2, help, color.RGBA{210, 210, 210, 255})
+	fb.present()
+
+	// Rendering a viewport is much more expensive than changing the highlight.
+	// Prepare the neighboring 3-card windows after the current frame is visible
+	// so crossing an off-screen boundary can use a ready-made framebuffer copy.
+	preloadNeighborViewports(fb, v, windowStart)
 }
 
 type mglVariant struct {
@@ -2261,6 +2511,9 @@ func launchEntry(e Entry, music *musicPlayer, fb *framebuffer, term *terminalSta
 }
 
 func validate(base string) int {
+	cfg := loadConfig()
+	swapABInput.Store(cfg.SwapAB)
+	swapXYInput.Store(cfg.SwapXY)
 	cs, err := scanCollections(base)
 	if err != nil {
 		fmt.Println("ERROR:", err)
@@ -2324,10 +2577,14 @@ func recoverFailedLaunch(ch <-chan action) {
 	}
 }
 
-func runGameMenu(fb *framebuffer, acts <-chan action, term *terminalState, c *Collection, mode string) {
+func runGameMenu(fb *framebuffer, acts <-chan action, term *terminalState, c *Collection, mode string, cfg *Config) {
 	sel := 0
 	windowStart := 0
-	music := startMusic(absPath(c, c.Music))
+	musicPath := ""
+	if cfg == nil || cfg.BackgroundAudio {
+		musicPath = absPath(c, c.Music)
+	}
+	music := startMusic(musicPath)
 	defer music.Stop()
 	view := prepareCollectionView(fb, c)
 	drawCollectionSelection(fb, view, sel, windowStart)
@@ -2347,18 +2604,38 @@ func runGameMenu(fb *framebuffer, acts <-chan action, term *terminalState, c *Co
 		}
 		switch a {
 		case actLeft, actUp:
-			if sel > 0 {
-				sel--
-				if sel < windowStart {
-					windowStart--
+			if len(c.Entries) > 0 {
+				if sel == 0 {
+					sel = len(c.Entries) - 1
+				} else {
+					sel--
+				}
+				if len(c.Entries) <= 3 {
+					windowStart = 0
+				} else if sel == len(c.Entries)-1 {
+					windowStart = len(c.Entries) - 3
+				} else if sel < windowStart {
+					windowStart = sel
+				} else if sel > windowStart+2 {
+					windowStart = sel - 2
 				}
 				drawCollectionSelection(fb, view, sel, windowStart)
 			}
 		case actRight, actDown:
-			if sel < len(c.Entries)-1 {
-				sel++
-				if sel > windowStart+2 {
-					windowStart++
+			if len(c.Entries) > 0 {
+				if sel == len(c.Entries)-1 {
+					sel = 0
+				} else {
+					sel++
+				}
+				if len(c.Entries) <= 3 {
+					windowStart = 0
+				} else if sel == 0 {
+					windowStart = 0
+				} else if sel > windowStart+2 {
+					windowStart = sel - 2
+				} else if sel < windowStart {
+					windowStart = sel
 				}
 				drawCollectionSelection(fb, view, sel, windowStart)
 			}
@@ -2397,7 +2674,6 @@ func main() {
 	runtimeBase = base
 	_ = os.MkdirAll(filepath.Join(runtimeBase, "tmp"), 0755)
 	appendLaunchLog("binary start version=%s args=%q base=%s", version, os.Args[1:], runtimeBase)
-	loadFaceMapping()
 	args := os.Args[1:]
 	if len(args) > 0 && (args[0] == "--version" || args[0] == "-v") {
 		fmt.Printf("CollectionLauncher v%s\n", version)
@@ -2406,11 +2682,15 @@ func main() {
 	if len(args) > 0 && args[0] == "--validate" {
 		os.Exit(validate(base))
 	}
+	cfg := loadConfig()
+	swapABInput.Store(cfg.SwapAB)
+	swapXYInput.Store(cfg.SwapXY)
 	cs, err := scanCollections(base)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "CollectionLauncher:", err)
 		os.Exit(1)
 	}
+	go preloadCollectionChrome(cs)
 	fb, err := openFramebuffer()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "CollectionLauncher: unable to open /dev/fb0:", err)
@@ -2456,7 +2736,7 @@ func main() {
 			}
 			return
 		}
-		runGameMenu(fb, acts, term, c, "direct")
+		runGameMenu(fb, acts, term, c, "direct", &cfg)
 		return
 	}
 
@@ -2471,11 +2751,14 @@ func main() {
 		case actDown, actRight:
 			bsel = (bsel + 1) % len(cs)
 			drawBrowser(fb, cs, bsel)
+		case actSettings:
+			runSettings(fb, acts, &cfg)
+			drawBrowser(fb, cs, bsel)
 		case actBack:
 			return
 		case actConfirm:
 			c := cs[bsel]
-			runGameMenu(fb, acts, term, c, "browser")
+			runGameMenu(fb, acts, term, c, "browser", &cfg)
 
 			bsel = 0
 			drawBrowser(fb, cs, bsel)

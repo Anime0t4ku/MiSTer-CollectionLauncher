@@ -35,7 +35,7 @@ jobs:
           mkdir -p build/Scripts/.config/CollectionLauncher
           go build -trimpath -ldflags="-s -w" \
             -o build/Scripts/.config/CollectionLauncher/collection_launcher \
-            main.go
+            main.go mister_input.go
           cp Scripts/CollectionLauncher.sh build/Scripts/CollectionLauncher.sh
           chmod +x build/Scripts/CollectionLauncher.sh
           chmod +x build/Scripts/.config/CollectionLauncher/collection_launcher
