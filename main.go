@@ -20,7 +20,7 @@ import (
 	"unsafe"
 )
 
-const version = "1.0.0"
+const version = "1.0.1"
 const defaultBase = "/media/fat/Scripts/.config/CollectionLauncher"
 
 var runtimeBase = defaultBase
@@ -517,6 +517,36 @@ func (t *terminalState) Restore() {
 	}
 }
 
+var inputGrabMu sync.Mutex
+var inputGrabFiles = map[*os.File]struct{}{}
+
+func registerInputGrab(f *os.File) {
+	inputGrabMu.Lock()
+	inputGrabFiles[f] = struct{}{}
+	inputGrabMu.Unlock()
+}
+
+func unregisterInputGrab(f *os.File) {
+	inputGrabMu.Lock()
+	delete(inputGrabFiles, f)
+	inputGrabMu.Unlock()
+}
+
+func releaseAllInputGrabs() {
+	const eviocgrab = 0x40044590
+	inputGrabMu.Lock()
+	files := make([]*os.File, 0, len(inputGrabFiles))
+	for f := range inputGrabFiles {
+		files = append(files, f)
+	}
+	inputGrabMu.Unlock()
+	for _, f := range files {
+		if f != nil {
+			_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(eviocgrab), uintptr(0))
+		}
+	}
+}
+
 func inputLoop(ch chan<- action, done <-chan struct{}) {
 	matches, _ := filepath.Glob("/dev/input/event*")
 	var emitMu sync.Mutex
@@ -554,9 +584,11 @@ func inputLoop(ch chan<- action, done <-chan struct{}) {
 		misterMap := loadMisterControllerMap(p)
 		const eviocgrab = 0x40044590
 		_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(eviocgrab), uintptr(1))
+		registerInputGrab(f)
 		go func(f *os.File, misterMap *misterControllerMap) {
 			defer func() {
 				_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), uintptr(eviocgrab), uintptr(0))
+				unregisterInputGrab(f)
 				f.Close()
 			}()
 			var hx, hy int32
@@ -2444,6 +2476,15 @@ func waitForArcadeCore(before coreState, timeout time.Duration) (string, bool) {
 	return readCoreName(), false
 }
 
+func prepareCoreHandoff(music *musicPlayer) {
+	appendLaunchLog("core_handoff_prepare begin")
+	if music != nil {
+		music.Stop()
+	}
+	releaseAllInputGrabs()
+	appendLaunchLog("core_handoff_prepare complete: music stopped, controller grabs released")
+}
+
 func launchEntry(e Entry, music *musicPlayer, fb *framebuffer, term *terminalState) error {
 	if e.Launch.System != "" && (e.Launch.Path != "" || len(e.Launch.Files) > 0) {
 		if isArcadeSystem(e.Launch.System) {
@@ -2461,47 +2502,40 @@ func launchEntry(e Entry, music *musicPlayer, fb *framebuffer, term *terminalSta
 			}
 
 			appendLaunchLog("arcade launch mra=%s", mraPath)
-
+			prepareCoreHandoff(music)
 			if err = sendMiSTerLoadCore(mraPath); err != nil {
-				appendLaunchLog("Arcade MiSTer handoff failed: %v", err)
+				appendLaunchLog("Arcade MiSTer handoff failed after input release: %v", err)
 				return err
 			}
 
 			appendLaunchLog("arcade handoff accepted, exiting CollectionLauncher")
-			music.Stop()
 			term.Restore()
 			fb.close()
 			os.Exit(0)
 		}
 
 		appendLaunchLog("selected system=%s path=%s files=%d ram=%s", e.Launch.System, e.Launch.Path, len(e.Launch.Files), e.Launch.RAM)
-		mglPath, preset, err := generateMGL(e.Launch)
+		mglPath, _, err := generateMGL(e.Launch)
 		if err != nil {
 			appendLaunchLog("MGL generation failed: %v", err)
 			return err
 		}
-		before := readCoreState()
-		appendLaunchLog("launch system=%s mgl=%s core_before=%q core_before_mtime=%s", e.Launch.System, mglPath, before.Name, before.ModTime.Format(time.RFC3339Nano))
+		appendLaunchLog("launch system=%s mgl=%s", e.Launch.System, mglPath)
 
+		prepareCoreHandoff(music)
 		if err = sendMiSTerLoadCore(mglPath); err != nil {
-			appendLaunchLog("MiSTer shell handoff failed: %v", err)
+			appendLaunchLog("MiSTer shell handoff failed after input release: %v", err)
 			return err
 		}
 
-		after, switched := waitForExpectedCore(preset, before, 7*time.Second)
-		appendLaunchLog("core_after=%q expected_system=%s switched=%v", after, e.Launch.System, switched)
-		if !switched {
-			return fmt.Errorf("MiSTer did not reach expected %s core (current %q)", e.Launch.System, after)
-		}
-
-		music.Stop()
+		appendLaunchLog("MiSTer handoff accepted for system=%s, exiting without CORENAME wait", e.Launch.System)
 		term.Restore()
 		fb.close()
 		os.Exit(0)
 	}
 
 	if e.Command != "" {
-		music.Stop()
+		prepareCoreHandoff(music)
 		term.Restore()
 		fb.close()
 		shell := "/bin/bash"

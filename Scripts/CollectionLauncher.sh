@@ -1,5 +1,5 @@
 #!/bin/bash
-VERSION="1.0.0"
+VERSION="1.0.1"
 printf '\033[?25l' > /dev/tty 2>/dev/null || true
 BASE="/media/fat/Scripts/.config/CollectionLauncher"
 TMP="$BASE/tmp"
