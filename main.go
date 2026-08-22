@@ -20,7 +20,7 @@ import (
 	"unsafe"
 )
 
-const version = "1.0.1"
+const version = "1.1.0"
 const defaultBase = "/media/fat/Scripts/.config/CollectionLauncher"
 
 var runtimeBase = defaultBase
@@ -114,15 +114,16 @@ type Collection struct {
 }
 
 type Config struct {
-	SwapAB          bool `json:"swap_ab"`
-	SwapXY          bool `json:"swap_xy"`
-	BackgroundAudio bool `json:"background_audio"`
+	SwapAB              bool `json:"swap_ab"`
+	SwapXY              bool `json:"swap_xy"`
+	BackgroundAudio     bool `json:"background_audio"`
+	ShowOffScreenArrows bool `json:"show_off_screen_arrows"`
 }
 
 func configPath() string { return filepath.Join(runtimeBase, "config.json") }
 
 func loadConfig() Config {
-	cfg := Config{BackgroundAudio: true}
+	cfg := Config{BackgroundAudio: true, ShowOffScreenArrows: true}
 	b, err := os.ReadFile(configPath())
 	if err == nil {
 		_ = json.Unmarshal(b, &cfg)
@@ -796,8 +797,8 @@ func drawSettings(fb *framebuffer, cfg Config, sel int) {
 	gray := color.RGBA{165, 165, 170, 255}
 	fb.text(36, 28, 3, fmt.Sprintf("Collection Launcher v%s", version), white)
 	fb.text(72, 92, 4, "SETTINGS", white)
-	labels := []string{"SWAP A/B", "SWAP X/Y", "BACKGROUND AUDIO"}
-	values := []bool{cfg.SwapAB, cfg.SwapXY, cfg.BackgroundAudio}
+	labels := []string{"SWAP A/B", "SWAP X/Y", "BACKGROUND AUDIO", "OFF-SCREEN ARROWS"}
+	values := []bool{cfg.SwapAB, cfg.SwapXY, cfg.BackgroundAudio, cfg.ShowOffScreenArrows}
 	for i, label := range labels {
 		y := 175 + i*72
 		if i == sel {
@@ -811,8 +812,16 @@ func drawSettings(fb *framebuffer, cfg Config, sel int) {
 		}
 		fb.text(fb.w-100-textWidth(3, v), y, 3, v, gray)
 	}
-	desc := "DISABLE BACKGROUND AUDIO TO IGNORE MUSIC DEFINED BY COLLECTION JSON FILES"
-	fb.text((fb.w-textWidth(2, desc))/2, 175+3*72, 2, desc, gray)
+	desc := ""
+	switch sel {
+	case 2:
+		desc = "DISABLE BACKGROUND AUDIO TO IGNORE MUSIC DEFINED BY COLLECTION JSON FILES"
+	case 3:
+		desc = "SHOW < AND > WHEN MORE GAMES ARE AVAILABLE OFF-SCREEN"
+	}
+	if desc != "" {
+		fb.text((fb.w-textWidth(2, desc))/2, 175+4*72, 2, desc, gray)
+	}
 	fb.rect(0, fb.h-78, fb.w, 78, color.RGBA{0, 0, 0, 255})
 	footer := "DPAD  CHANGE     A  TOGGLE     B / SELECT  BACK"
 	fb.text((fb.w-textWidth(2, footer))/2, fb.h-47, 2, footer, gray)
@@ -826,9 +835,9 @@ func runSettings(fb *framebuffer, acts <-chan action, cfg *Config) {
 	for a := range acts {
 		switch a {
 		case actUp:
-			sel = (sel - 1 + 3) % 3
+			sel = (sel - 1 + 4) % 4
 		case actDown:
-			sel = (sel + 1) % 3
+			sel = (sel + 1) % 4
 		case actLeft, actRight, actConfirm:
 			switch sel {
 			case 0:
@@ -839,6 +848,8 @@ func runSettings(fb *framebuffer, acts <-chan action, cfg *Config) {
 				swapXYInput.Store(cfg.SwapXY)
 			case 2:
 				cfg.BackgroundAudio = !cfg.BackgroundAudio
+			case 3:
+				cfg.ShowOffScreenArrows = !cfg.ShowOffScreenArrows
 			}
 			saveConfig(*cfg)
 		case actBack, actSettings:
@@ -864,22 +875,23 @@ type cachedViewport struct {
 }
 
 type collectionView struct {
-	c             *Collection
-	base          []byte
-	cardX         []int
-	cardY         int
-	cardW         int
-	cardH         int
-	artRects      []imageRect
-	artworks      []image.Image
-	wallpaper     image.Image
-	logo          image.Image
-	viewportBase  []byte
-	viewportStart int
-	viewportRects map[int]imageRect
-	viewportMu    sync.RWMutex
-	viewportCache map[int]cachedViewport
-	viewportBusy  map[int]bool
+	c                   *Collection
+	base                []byte
+	cardX               []int
+	cardY               int
+	cardW               int
+	cardH               int
+	artRects            []imageRect
+	artworks            []image.Image
+	wallpaper           image.Image
+	logo                image.Image
+	viewportBase        []byte
+	viewportStart       int
+	viewportRects       map[int]imageRect
+	viewportMu          sync.RWMutex
+	viewportCache       map[int]cachedViewport
+	viewportBusy        map[int]bool
+	showOffScreenArrows bool
 }
 
 func captureVisible(fb *framebuffer) []byte {
@@ -918,8 +930,8 @@ func containedImageRect(img image.Image, dx, dy, dw, dh int) imageRect {
 	}
 }
 
-func prepareCollectionView(fb *framebuffer, c *Collection) *collectionView {
-	v := &collectionView{c: c}
+func prepareCollectionView(fb *framebuffer, c *Collection, showOffScreenArrows bool) *collectionView {
+	v := &collectionView{c: c, showOffScreenArrows: showOffScreenArrows}
 	v.wallpaper, _ = loadCachedImage(absPath(c, c.Wallpaper))
 	if c.Logo != "" {
 		v.logo, _ = loadCachedImage(absPath(c, c.Logo))
@@ -1078,10 +1090,10 @@ func renderViewport(fb *framebuffer, v *collectionView, windowStart int) cachedV
 	}
 	arrowThickness := 7
 
-	if windowStart > 0 {
+	if v.showOffScreenArrows && windowStart > 0 {
 		drawChevron(tmp, startX/2, arrowY, arrowSize, arrowThickness, false, color.RGBA{255, 255, 255, 255})
 	}
-	if windowStart+visibleCount < n {
+	if v.showOffScreenArrows && windowStart+visibleCount < n {
 		rightSpaceStart := startX + total
 		drawChevron(tmp, rightSpaceStart+(tmp.w-rightSpaceStart)/2, arrowY, arrowSize, arrowThickness, true, color.RGBA{255, 255, 255, 255})
 	}
@@ -1460,6 +1472,7 @@ var systemPresets = []systemPreset{
 		Aliases: []string{"GG", "Game Gear"},
 		Variants: []mglVariant{
 			{Role: "game", Label: "-", Exts: []string{".gg"}, Delay: 1, Type: "f", Index: 2},
+			{Role: "game", Label: "-", Exts: []string{".sms"}, Delay: 1, Type: "f", Index: 1},
 		},
 	},
 	{
@@ -2485,6 +2498,13 @@ func prepareCoreHandoff(music *musicPlayer) {
 	appendLaunchLog("core_handoff_prepare complete: music stopped, controller grabs released")
 }
 
+func markServiceHandoff() {
+	path := filepath.Join(runtimeBase, "tmp", "service_handoff")
+	if err := os.WriteFile(path, []byte("game\n"), 0644); err != nil {
+		appendLaunchLog("service handoff marker failed: %v", err)
+	}
+}
+
 func launchEntry(e Entry, music *musicPlayer, fb *framebuffer, term *terminalState) error {
 	if e.Launch.System != "" && (e.Launch.Path != "" || len(e.Launch.Files) > 0) {
 		if isArcadeSystem(e.Launch.System) {
@@ -2509,6 +2529,7 @@ func launchEntry(e Entry, music *musicPlayer, fb *framebuffer, term *terminalSta
 			}
 
 			appendLaunchLog("arcade handoff accepted, exiting CollectionLauncher")
+			markServiceHandoff()
 			term.Restore()
 			fb.close()
 			os.Exit(0)
@@ -2529,6 +2550,7 @@ func launchEntry(e Entry, music *musicPlayer, fb *framebuffer, term *terminalSta
 		}
 
 		appendLaunchLog("MiSTer handoff accepted for system=%s, exiting without CORENAME wait", e.Launch.System)
+		markServiceHandoff()
 		term.Restore()
 		fb.close()
 		os.Exit(0)
@@ -2536,6 +2558,7 @@ func launchEntry(e Entry, music *musicPlayer, fb *framebuffer, term *terminalSta
 
 	if e.Command != "" {
 		prepareCoreHandoff(music)
+		markServiceHandoff()
 		term.Restore()
 		fb.close()
 		shell := "/bin/bash"
@@ -2620,7 +2643,7 @@ func runGameMenu(fb *framebuffer, acts <-chan action, term *terminalState, c *Co
 	}
 	music := startMusic(musicPath)
 	defer music.Stop()
-	view := prepareCollectionView(fb, c)
+	view := prepareCollectionView(fb, c, cfg == nil || cfg.ShowOffScreenArrows)
 	drawCollectionSelection(fb, view, sel, windowStart)
 	appendLaunchLog("game_menu_enter mode=%s collection=%s entries=%d", mode, c.ID, len(c.Entries))
 
