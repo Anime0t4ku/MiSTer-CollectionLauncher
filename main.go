@@ -20,7 +20,7 @@ import (
 	"unsafe"
 )
 
-const version = "1.1.0"
+const version = "1.2.0"
 const defaultBase = "/media/fat/Scripts/.config/CollectionLauncher"
 
 var runtimeBase = defaultBase
@@ -1612,6 +1612,13 @@ var systemPresets = []systemPreset{
 		Aliases: []string{"Magnavox Odyssey2"},
 		Variants: []mglVariant{
 			{Role: "cart", Label: "Cartridge", Exts: []string{".bin"}, Delay: 1, Type: "f", Index: 1},
+		},
+	},
+	{
+		ID: "MiSTerDVD", RBF: "_Other/DVD",
+		Aliases: []string{"MiSTer DVD", "DVD"},
+		Variants: []mglVariant{
+			{Role: "video", Label: "Video", Exts: []string{".iso", ".bin", ".img", ".dat", ".vob", ".mpg", ".m2v"}, Delay: 1, Type: "s", Index: 0},
 		},
 	},
 	{

@@ -158,6 +158,17 @@ For most systems, a game entry only needs the system name and game path:
 }
 ```
 
+MiSTer DVD videos can be launched directly through the DVD core:
+
+```json
+"launch": {
+  "system": "MiSTer DVD",
+  "path": "/media/fat/games/DVD/Example Movie.mpg"
+}
+```
+
+Supported MiSTer DVD formats are ISO, BIN, IMG, DAT, VOB, MPG and M2V.
+
 Game paths should use the full MiSTer path, for example:
 
 ```text
